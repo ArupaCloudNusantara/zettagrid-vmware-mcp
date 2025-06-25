@@ -7,13 +7,20 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 This is a Zettagrid VMware MCP (Model Context Protocol) Server that provides comprehensive tenant organization management across Australian zones. It's a TypeScript-based Node.js application that interfaces with VMware vCloud Director APIs.
 
 ### Core Architecture
-- **`src/zettagrid-client.ts`** - Main API client with comprehensive vCloud Director operations
-- **`src/zone-manager.ts`** - Multi-zone configuration and management across Australian regions
+- **`src/index.ts`** - Main MCP server entry point
+- **`src/server/mcp-server.ts`** - MCP protocol implementation and tool handlers
+- **`src/client/zettagrid-client.ts`** - Main API client with comprehensive vCloud Director operations
+- **`src/managers/`** - Business logic and resource management
+  - **`zone-manager.ts`** - Multi-zone configuration and management across Australian regions
+  - **`firewall-manager.ts`** - Firewall rule management and operations
+  - **`vm-creator.ts`** - Virtual machine creation and lifecycle management
 - **`src/auth/`** - Authentication system with OAuth token management
   - **`token-manager.ts`** - API token authentication and session management
   - **`zone-auth.ts`** - Zone-specific authentication handlers
 - **`src/types.ts`** - Complete TypeScript interfaces for vCloud Director API schema
 - **`src/utils/xml-parser.ts`** - XML response parsing utilities for vCloud Director API
+- **`src/examples/`** - Example scripts and usage demonstrations
+- **`src/lib/`** - Library exports for external usage
 
 ### Multi-Zone Support
 The application supports all Australian Zettagrid zones:
@@ -45,7 +52,7 @@ npm run clean            # Clean build directory
 ### Test Infrastructure
 - **Unit tests**: Located in `tests/unit/`
 - **Integration tests**: Located in `tests/integration/`
-- **Live testing**: `npx tsx src/test-client.ts` - Tests against real Zettagrid infrastructure
+- **Live testing**: `npx tsx src/examples/connectivity-test.ts` - Tests against real Zettagrid infrastructure
 - **Test fixtures**: Located in `tests/fixtures/`
 
 ## Environment Configuration

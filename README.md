@@ -116,7 +116,7 @@ Test your configuration with the built-in connectivity test:
 ```bash
 npm run test:connectivity
 # or manually:
-npx tsx src/test-client.ts
+npx tsx src/examples/connectivity-test.ts
 ```
 
 This will validate:
@@ -244,6 +244,7 @@ The server provides comprehensive MCP tools for cloud management:
 #### Virtual Data Center (VDC) Operations
 - `list_vdcs` - List virtual data centers
 - `get_vdc` - Get VDC details and capabilities
+- `show_vdc_resources` - Show VDC resource allocation and usage table (RAM, vCPU, Storage)
 - `get_vdc_compute_policies` - Retrieve compute policies and limits
 
 #### vApp Lifecycle Management
@@ -258,18 +259,22 @@ The server provides comprehensive MCP tools for cloud management:
 - `get_vm` - Get VM details and configuration
 - `power_on_vm` - Start virtual machine
 - `power_off_vm` - Stop virtual machine
+- `get_vm_console` - Get VM console access ticket
 
 #### Storage Management
 - `list_disks` - List independent disks
 - `create_disk` - Create new storage disk
 - `attach_disk` - Attach disk to VM
-- `create_snapshot` - Create VM/vApp snapshot
 
 #### Network Configuration
 - `list_org_networks` - List organization networks
 - `create_org_network` - Create organization network
-- `create_firewall_rule` - Configure firewall rules
-- `create_nat_rule` - Configure NAT rules
+
+#### Firewall and Security
+- `list_edge_gateways` - List edge gateways
+- `get_edge_gateway` - Get edge gateway details and configuration
+- `list_firewall_rules` - List firewall rules for an edge gateway
+- `create_firewall_rule` - Create new firewall rule
 
 ### API Client Usage
 

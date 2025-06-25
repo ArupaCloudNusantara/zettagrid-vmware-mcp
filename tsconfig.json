@@ -28,7 +28,14 @@
     "types": ["node", "jest"]
   },
   "include": [
-    "src/**/*"
+    "src/index.ts",
+    "src/server/**/*",
+    "src/client/**/*", 
+    "src/managers/zone-manager.ts",
+    "src/auth/**/*",
+    "src/types.ts",
+    "src/utils/**/*",
+    "src/lib/**/*"
   ],
   "exclude": [
     "node_modules",

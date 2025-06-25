@@ -258,6 +258,126 @@ export interface VdcStorageProfile extends VCloudEntity {
   iopsLimit?: number;
 }
 
+// VDC Resource Display Types
+export interface VdcResourceSummary {
+  vdcId: string;
+  vdcName: string;
+  allocationModel?: 'AllocationVApp' | 'AllocationPool' | 'ReservationPool' | 'Flex';
+  resources: VdcResourceTable;
+}
+
+export interface VdcResourceTable {
+  ram: VdcResourceRow;
+  vcpu: VdcResourceRow;
+  storage: VdcResourceRow;
+}
+
+export interface VdcResourceRow {
+  resource: string;
+  units: string;
+  allocated: number | string;
+  used: number | string;
+  available: number | string;
+  utilization: string;
+}
+
+// Network Configuration Types
+export interface EdgeNetworkConfig {
+  edgeGatewayId: string;
+  edgeGatewayName: string;
+  externalIPs: ExternalIPInfo[];
+  gatewayInterfaces: EdgeGatewayInterfaceInfo[];
+  uplinks: UplinkInfo[];
+  externalNetworks: ExternalNetworkInfo[];
+  providerNetworks: ProviderNetworkInfo[];
+}
+
+export interface ExternalIPInfo {
+  ipAddress: string;
+  isAllocated: boolean;
+  isPrimary?: boolean;
+  interfaceName?: string;
+  networkName?: string;
+  usage?: string;
+}
+
+export interface EdgeGatewayInterfaceInfo {
+  name: string;
+  displayName?: string;
+  interfaceType: 'internal' | 'external' | 'trunk';
+  networkName?: string;
+  networkHref?: string;
+  connectedNetwork?: string;
+  ipAddresses: string[];
+  subnetMask?: string;
+  gateway?: string;
+  isConnected: boolean;
+  useForDefaultRoute?: boolean;
+  rateLimit?: {
+    inbound?: number;
+    outbound?: number;
+  };
+}
+
+export interface UplinkInfo {
+  name: string;
+  interfaceType: string;
+  isConnected: boolean;
+  subnets: UplinkSubnet[];
+  externalNetwork?: string;
+  bandwidth?: {
+    inbound?: number;
+    outbound?: number;
+  };
+}
+
+export interface UplinkSubnet {
+  gateway: string;
+  netmask: string;
+  ipRanges: IpRange[];
+  primaryIp?: string;
+  staticRoutes?: StaticRoute[];
+}
+
+export interface IpRange {
+  startAddress: string;
+  endAddress: string;
+}
+
+export interface StaticRoute {
+  destination: string;
+  nextHop: string;
+  metric?: number;
+}
+
+export interface ExternalNetworkInfo {
+  id: string;
+  name: string;
+  description?: string;
+  gateway?: string;
+  netmask?: string;
+  dns1?: string;
+  dns2?: string;
+  dnsSuffix?: string;
+  ipRanges: IpRange[];
+  isShared?: boolean;
+  networkType?: 'isolated' | 'bridged' | 'nat';
+}
+
+export interface ProviderNetworkInfo {
+  id: string;
+  name: string;
+  description?: string;
+  networkType: 'VLAN' | 'VXLAN' | 'PORTGROUP';
+  vlanId?: number;
+  vxlanId?: number;
+  isAvailable: boolean;
+  isShared: boolean;
+  totalIpCount?: number;
+  usedIpCount?: number;
+  availableIpCount?: number;
+}
+
 // vApp Types
 export interface VApp extends VCloudEntity {
   status?: number;
@@ -335,11 +455,6 @@ export interface IpScope {
 
 export interface IpRanges {
   ipRange?: IpRange[];
-}
-
-export interface IpRange {
-  startAddress?: string;
-  endAddress?: string;
 }
 
 export interface AllocatedIpAddresses {
@@ -530,6 +645,22 @@ export interface Vm extends VCloudEntity {
   snapshotSection?: SnapshotSection;
   dateCreated?: string;
   tasks?: TasksList;
+}
+
+// Console Types
+export interface ConsoleTicket {
+  ticket?: string;
+  vmx?: string;
+  host?: string;
+  port?: number;
+  sslThumbprint?: string;
+}
+
+export interface VmConsoleTicket extends VCloudEntity {
+  ticket?: string;
+  vmName?: string;
+  consoleType?: 'VMRC' | 'WebMKS' | 'VNC';
+  vmId?: string;
 }
 
 export interface VmEnvironment {

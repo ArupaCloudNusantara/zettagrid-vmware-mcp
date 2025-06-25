@@ -4,8 +4,8 @@
  */
 
 import { readFileSync } from 'fs';
-import { ZettagridClient } from './zettagrid-client.js';
-import { ZoneManager } from './zone-manager.js';
+import { ZettagridClient } from '../client/zettagrid-client.js';
+import { ZoneManager } from '../managers/zone-manager.js';
 
 // Simple .env file loader
 function loadEnvFile() {

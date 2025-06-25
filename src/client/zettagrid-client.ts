@@ -3,9 +3,9 @@
  * Provides comprehensive API access to Zettagrid's vCloud Director infrastructure
  */
 
-import { ZoneManager } from './zone-manager.js';
-import { TokenManager } from './auth/token-manager.js';
-import { ZoneAuth } from './auth/zone-auth.js';
+import { ZoneManager } from '../managers/zone-manager.js';
+import { TokenManager } from '../auth/token-manager.js';
+import { ZoneAuth } from '../auth/zone-auth.js';
 import { 
   ApiRequestConfig, 
   ApiResponse, 
@@ -14,14 +14,26 @@ import {
   Vdc,
   VApp,
   Vm,
+  VmConsoleTicket,
+  EdgeGateway,
+  FirewallRule,
+  VdcResourceSummary,
+  VdcResourceTable,
+  VdcResourceRow,
+  EdgeNetworkConfig,
+  ExternalIPInfo,
+  EdgeGatewayInterfaceInfo,
+  UplinkInfo,
+  ExternalNetworkInfo,
+  ProviderNetworkInfo,
   QueryResultRecords,
   PaginationParams,
   ListResponse
-} from './types.js';
+} from '../types.js';
 import { 
   parseVdcRecords, 
   parseVMRecords
-} from './utils/xml-parser.js';
+} from '../utils/xml-parser.js';
 
 export class ZettagridClient {
   private zoneManager: ZoneManager;
@@ -341,6 +353,96 @@ export class ZettagridClient {
     }
   }
 
+  /**
+   * Show VDC resources in table format
+   */
+  async showVdcResources(vdcId: string, zoneId?: string): Promise<McpToolResponse<VdcResourceSummary>> {
+    try {
+      // Get VDC details first
+      const vdcResponse = await this.makeRequest<Vdc>({
+        method: 'GET',
+        url: `/vdc/${vdcId}`
+      }, zoneId);
+
+      const vdc = vdcResponse.data;
+      
+      // Helper function to format numbers
+      const formatNumber = (value?: number): string => {
+        if (value === undefined || value === null) return 'N/A';
+        if (value >= 1024) return `${(value / 1024).toFixed(1)}`;
+        return value.toString();
+      };
+
+      // Helper function to calculate utilization percentage
+      const calculateUtilization = (used?: number, allocated?: number): string => {
+        if (!used || !allocated || allocated === 0) return '0%';
+        return `${Math.round((used / allocated) * 100)}%`;
+      };
+
+      // Process RAM (Memory)
+      const memory = vdc.computeCapacity?.memory;
+      const ramRow: VdcResourceRow = {
+        resource: 'RAM',
+        units: memory?.units === 'MB' ? 'GB' : (memory?.units || 'MB'),
+        allocated: memory?.allocated ? (memory.units === 'MB' ? formatNumber(memory.allocated / 1024) : formatNumber(memory.allocated)) : 'N/A',
+        used: memory?.used ? (memory.units === 'MB' ? formatNumber(memory.used / 1024) : formatNumber(memory.used)) : 'N/A',
+        available: memory?.allocated && memory?.used ? 
+          (memory.units === 'MB' ? formatNumber((memory.allocated - memory.used) / 1024) : formatNumber(memory.allocated - memory.used)) : 'N/A',
+        utilization: calculateUtilization(memory?.used, memory?.allocated)
+      };
+
+      // Process vCPU
+      const cpu = vdc.computeCapacity?.cpu;
+      const vcpuRow: VdcResourceRow = {
+        resource: 'vCPU',
+        units: cpu?.units || 'MHz',
+        allocated: formatNumber(cpu?.allocated),
+        used: formatNumber(cpu?.used),
+        available: cpu?.allocated && cpu?.used ? formatNumber(cpu.allocated - cpu.used) : 'N/A',
+        utilization: calculateUtilization(cpu?.used, cpu?.allocated)
+      };
+
+      // Process Storage
+      const storage = vdc.storageCapacity;
+      const storageRow: VdcResourceRow = {
+        resource: 'Storage',
+        units: storage?.units === 'MB' ? 'GB' : (storage?.units || 'MB'),
+        allocated: storage?.allocated ? (storage.units === 'MB' ? formatNumber(storage.allocated / 1024) : formatNumber(storage.allocated)) : 'N/A',
+        used: storage?.used ? (storage.units === 'MB' ? formatNumber(storage.used / 1024) : formatNumber(storage.used)) : 'N/A',
+        available: storage?.allocated && storage?.used ? 
+          (storage.units === 'MB' ? formatNumber((storage.allocated - storage.used) / 1024) : formatNumber(storage.allocated - storage.used)) : 'N/A',
+        utilization: calculateUtilization(storage?.used, storage?.allocated)
+      };
+
+      // Create resource table
+      const resourceTable: VdcResourceTable = {
+        ram: ramRow,
+        vcpu: vcpuRow,
+        storage: storageRow
+      };
+
+      // Create summary
+      const summary: VdcResourceSummary = {
+        vdcId: vdcId,
+        vdcName: vdc.name || 'Unknown VDC',
+        resources: resourceTable
+      };
+
+      // Add allocation model if available
+      if (vdc.allocationModel) {
+        summary.allocationModel = vdc.allocationModel;
+      }
+
+      return this.formatMcpResponse(summary, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as VdcResourceSummary, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'SHOW_VDC_RESOURCES_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to show VDC resources',
+        details: error
+      });
+    }
+  }
+
   // === VAPP METHODS ===
 
   /**
@@ -563,6 +665,26 @@ export class ZettagridClient {
   }
 
   /**
+   * Get VM console ticket
+   */
+  async getVMConsole(vmId: string, zoneId?: string): Promise<McpToolResponse<VmConsoleTicket>> {
+    try {
+      const response = await this.makeRequest<VmConsoleTicket>({
+        method: 'POST',
+        url: `/vApp/vm-${vmId}/screen/action/acquireTicket`
+      }, zoneId);
+
+      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as VmConsoleTicket, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'GET_VM_CONSOLE_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to get VM console ticket',
+        details: error
+      });
+    }
+  }
+
+  /**
    * Create a new vApp from template
    */
   async createVApp(vdcId: string, templateId: string, vappName: string, zoneId?: string): Promise<McpToolResponse<any>> {
@@ -687,6 +809,397 @@ export class ZettagridClient {
         details: error
       });
     }
+  }
+
+  // === EDGE GATEWAY AND FIREWALL METHODS ===
+
+  /**
+   * List edge gateways
+   */
+  async listEdgeGateways(zoneId?: string, pagination?: PaginationParams): Promise<McpToolResponse<ListResponse<EdgeGateway>>> {
+    try {
+      const params: Record<string, string> = { type: 'edgeGateway' };
+      
+      if (pagination) {
+        if (pagination.page) params.page = pagination.page.toString();
+        if (pagination.pageSize) params.pageSize = pagination.pageSize.toString();
+        if (pagination.filter) params.filter = pagination.filter;
+      }
+
+      const response = await this.makeRequest<QueryResultRecords>({
+        method: 'GET',
+        url: '/query',
+        params
+      }, zoneId);
+
+      // TODO: Parse edge gateways from query response
+      const edgeGateways: EdgeGateway[] = [];
+      const listResponse: ListResponse<EdgeGateway> = {
+        items: edgeGateways,
+        total: response.data.total || 0,
+        page: pagination?.page || 1,
+        pageSize: pagination?.pageSize || 25,
+        hasMore: (pagination?.page || 1) * (pagination?.pageSize || 25) < (response.data.total || 0)
+      };
+
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<EdgeGateway>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_EDGE_GATEWAYS_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list edge gateways',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Get edge gateway details
+   */
+  async getEdgeGateway(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<EdgeGateway>> {
+    try {
+      const response = await this.makeRequest<EdgeGateway>({
+        method: 'GET',
+        url: `/admin/edgeGateway/${edgeGatewayId}`
+      }, zoneId);
+
+      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as EdgeGateway, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'GET_EDGE_GATEWAY_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to get edge gateway',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * List firewall rules for an edge gateway
+   */
+  async listFirewallRules(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<ListResponse<FirewallRule>>> {
+    try {
+      const response = await this.makeRequest<EdgeGateway>({
+        method: 'GET',
+        url: `/admin/edgeGateway/${edgeGatewayId}`
+      }, zoneId);
+
+      // Extract firewall rules from edge gateway configuration
+      const firewallRules = response.data.configuration?.edgeGatewayServiceConfiguration?.firewallService?.firewallRule || [];
+      
+      const listResponse: ListResponse<FirewallRule> = {
+        items: firewallRules,
+        total: firewallRules.length,
+        page: 1,
+        pageSize: firewallRules.length,
+        hasMore: false
+      };
+
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<FirewallRule>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_FIREWALL_RULES_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list firewall rules',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Create a firewall rule
+   */
+  async createFirewallRule(
+    edgeGatewayId: string, 
+    firewallRule: Partial<FirewallRule>, 
+    zoneId?: string
+  ): Promise<McpToolResponse<any>> {
+    try {
+      // Create firewall rule XML payload
+      const firewallRuleXml = `<?xml version="1.0" encoding="UTF-8"?>
+<FirewallRule xmlns="http://www.vmware.com/vcloud/v1.5">
+    <IsEnabled>${firewallRule.isEnabled || true}</IsEnabled>
+    <Description>${firewallRule.description || ''}</Description>
+    <Policy>${firewallRule.policy || 'allow'}</Policy>
+    <Protocols>
+        <Tcp>${firewallRule.protocols?.tcp || false}</Tcp>
+        <Udp>${firewallRule.protocols?.udp || false}</Udp>
+        <Icmp>${firewallRule.protocols?.icmp || false}</Icmp>
+    </Protocols>
+    <DestinationPortRange>${firewallRule.destinationPortRange || 'Any'}</DestinationPortRange>
+    <DestinationIp>${firewallRule.destinationIp || 'Any'}</DestinationIp>
+    <SourcePortRange>${firewallRule.sourcePortRange || 'Any'}</SourcePortRange>
+    <SourceIp>${firewallRule.sourceIp || 'Any'}</SourceIp>
+    <EnableLogging>${firewallRule.enableLogging || false}</EnableLogging>
+</FirewallRule>`;
+
+      const response = await this.makeRequest({
+        method: 'POST',
+        url: `/admin/edgeGateway/${edgeGatewayId}/action/configureServices`,
+        data: firewallRuleXml,
+        headers: {
+          'Content-Type': 'application/vnd.vmware.vcloud.firewallRule+xml'
+        }
+      }, zoneId);
+
+      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'CREATE_FIREWALL_RULE_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to create firewall rule',
+        details: error
+      });
+    }
+  }
+
+  // === NETWORK CONFIGURATION METHODS ===
+
+  /**
+   * Show comprehensive edge gateway network configuration
+   */
+  async showEdgeNetworkConfig(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<EdgeNetworkConfig>> {
+    try {
+      // Get edge gateway details with network configuration
+      const edgeResponse = await this.makeRequest<EdgeGateway>({
+        method: 'GET',
+        url: `/admin/edgeGateway/${edgeGatewayId}`
+      }, zoneId);
+
+      const edgeGateway = edgeResponse.data;
+      
+      // Extract network configuration information
+      const config: EdgeNetworkConfig = {
+        edgeGatewayId: edgeGatewayId,
+        edgeGatewayName: edgeGateway.name || 'Unknown Edge Gateway',
+        externalIPs: this.extractExternalIPs(edgeGateway),
+        gatewayInterfaces: this.extractGatewayInterfaces(edgeGateway),
+        uplinks: this.extractUplinks(edgeGateway),
+        externalNetworks: await this.getExternalNetworks(zoneId),
+        providerNetworks: await this.getProviderNetworks(zoneId)
+      };
+
+      return this.formatMcpResponse(config, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as EdgeNetworkConfig, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'SHOW_EDGE_NETWORK_CONFIG_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to get edge network configuration',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * List external networks
+   */
+  async listExternalNetworks(zoneId?: string): Promise<McpToolResponse<ListResponse<ExternalNetworkInfo>>> {
+    try {
+      const networks = await this.getExternalNetworks(zoneId);
+      
+      const listResponse: ListResponse<ExternalNetworkInfo> = {
+        items: networks,
+        total: networks.length,
+        page: 1,
+        pageSize: networks.length,
+        hasMore: false
+      };
+
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<ExternalNetworkInfo>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_EXTERNAL_NETWORKS_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list external networks',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Get provider network information
+   */
+  async getProviderNetworkInfo(zoneId?: string): Promise<McpToolResponse<ListResponse<ProviderNetworkInfo>>> {
+    try {
+      const networks = await this.getProviderNetworks(zoneId);
+      
+      const listResponse: ListResponse<ProviderNetworkInfo> = {
+        items: networks,
+        total: networks.length,
+        page: 1,
+        pageSize: networks.length,
+        hasMore: false
+      };
+
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<ProviderNetworkInfo>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'GET_PROVIDER_NETWORK_INFO_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to get provider network information',
+        details: error
+      });
+    }
+  }
+
+  // === PRIVATE HELPER METHODS FOR NETWORK EXTRACTION ===
+
+  private extractExternalIPs(edgeGateway: EdgeGateway): ExternalIPInfo[] {
+    const externalIPs: ExternalIPInfo[] = [];
+    
+    try {
+      // Extract IPs from gateway interfaces
+      const interfaces = edgeGateway.configuration?.gatewayInterfaces?.gatewayInterface || [];
+      
+      interfaces.forEach(intf => {
+        if (intf.interfaceType === 'external' && intf.subnetParticipation) {
+          intf.subnetParticipation.forEach(subnet => {
+            if (subnet.gateway) {
+              const externalIP: ExternalIPInfo = {
+                ipAddress: subnet.gateway,
+                isAllocated: true,
+                isPrimary: true,
+                usage: 'Gateway IP'
+              };
+              if (intf.name) externalIP.interfaceName = intf.name;
+              if (intf.network?.name) externalIP.networkName = intf.network.name;
+              externalIPs.push(externalIP);
+            }
+          });
+        }
+      });
+    } catch (error) {
+      console.warn('Failed to extract external IPs:', error);
+    }
+    
+    return externalIPs;
+  }
+
+  private extractGatewayInterfaces(edgeGateway: EdgeGateway): EdgeGatewayInterfaceInfo[] {
+    const interfaces: EdgeGatewayInterfaceInfo[] = [];
+    
+    try {
+      const gatewayInterfaces = edgeGateway.configuration?.gatewayInterfaces?.gatewayInterface || [];
+      
+      gatewayInterfaces.forEach(intf => {
+        const interfaceInfo: EdgeGatewayInterfaceInfo = {
+          name: intf.name || 'Unknown',
+          interfaceType: intf.interfaceType || 'internal',
+          ipAddresses: [],
+          isConnected: !!intf.network
+        };
+
+        // Add optional properties only if they exist
+        if (intf.displayName) interfaceInfo.displayName = intf.displayName;
+        if (intf.network?.name) interfaceInfo.networkName = intf.network.name;
+        if (intf.network?.href) interfaceInfo.networkHref = intf.network.href;
+        if (intf.useForDefaultRoute !== undefined) interfaceInfo.useForDefaultRoute = intf.useForDefaultRoute;
+
+        // Extract IP addresses from subnet participation
+        if (intf.subnetParticipation) {
+          intf.subnetParticipation.forEach(subnet => {
+            if (subnet.gateway) {
+              interfaceInfo.ipAddresses.push(subnet.gateway);
+              interfaceInfo.gateway = subnet.gateway;
+            }
+          });
+        }
+
+        // Extract rate limits
+        if (intf.inRateLimit || intf.outRateLimit) {
+          interfaceInfo.rateLimit = {};
+          if (intf.inRateLimit) interfaceInfo.rateLimit.inbound = intf.inRateLimit;
+          if (intf.outRateLimit) interfaceInfo.rateLimit.outbound = intf.outRateLimit;
+        }
+
+        interfaces.push(interfaceInfo);
+      });
+    } catch (error) {
+      console.warn('Failed to extract gateway interfaces:', error);
+    }
+    
+    return interfaces;
+  }
+
+  private extractUplinks(edgeGateway: EdgeGateway): UplinkInfo[] {
+    const uplinks: UplinkInfo[] = [];
+    
+    try {
+      const interfaces = edgeGateway.configuration?.gatewayInterfaces?.gatewayInterface || [];
+      
+      interfaces.forEach(intf => {
+        if (intf.interfaceType === 'external') {
+          const uplink: UplinkInfo = {
+            name: intf.name || 'Unknown',
+            interfaceType: intf.interfaceType,
+            isConnected: !!intf.network,
+            subnets: []
+          };
+
+          // Add optional properties only if they exist
+          if (intf.network?.name) uplink.externalNetwork = intf.network.name;
+
+          // Extract subnet information
+          if (intf.subnetParticipation) {
+            intf.subnetParticipation.forEach(subnet => {
+              if (subnet.gateway) {
+                uplink.subnets.push({
+                  gateway: subnet.gateway,
+                  netmask: '255.255.255.0', // Default, should be extracted from actual data
+                  ipRanges: [],
+                  primaryIp: subnet.gateway
+                });
+              }
+            });
+          }
+
+          uplinks.push(uplink);
+        }
+      });
+    } catch (error) {
+      console.warn('Failed to extract uplinks:', error);
+    }
+    
+    return uplinks;
+  }
+
+  private async getExternalNetworks(zoneId?: string): Promise<ExternalNetworkInfo[]> {
+    const networks: ExternalNetworkInfo[] = [];
+    
+    try {
+      // Query for external networks
+      await this.makeRequest<QueryResultRecords>({
+        method: 'GET',
+        url: '/query',
+        params: {
+          type: 'externalNetwork'
+        }
+      }, zoneId);
+
+      // Parse external networks (placeholder implementation)
+      // This would need proper XML parsing based on actual response format
+      
+    } catch (error) {
+      console.warn('Failed to get external networks:', error);
+    }
+    
+    return networks;
+  }
+
+  private async getProviderNetworks(zoneId?: string): Promise<ProviderNetworkInfo[]> {
+    const networks: ProviderNetworkInfo[] = [];
+    
+    try {
+      // Query for provider networks 
+      await this.makeRequest<QueryResultRecords>({
+        method: 'GET',
+        url: '/query',
+        params: {
+          type: 'providerVdcNetwork'
+        }
+      }, zoneId);
+
+      // Parse provider networks (placeholder implementation)
+      // This would need proper XML parsing based on actual response format
+      
+    } catch (error) {
+      console.warn('Failed to get provider networks:', error);
+    }
+    
+    return networks;
   }
 
   /**

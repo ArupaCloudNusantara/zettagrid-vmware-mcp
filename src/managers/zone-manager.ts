@@ -2,7 +2,7 @@
  * Zettagrid Zone Manager - Multi-zone configuration and management
  */
 
-import { ZoneConfig, ZettagridConfig, ZoneId } from './types.js';
+import { ZoneConfig, ZettagridConfig, ZoneId } from '../types.js';
 
 export class ZoneManager {
   private config: ZettagridConfig;
