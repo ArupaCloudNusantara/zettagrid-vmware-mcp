@@ -41,7 +41,7 @@ npm start
 
 1. **Clone the repository**:
 ```bash
-git clone https://github.com/phantosmax/zettagrid-vmware-mcp.git
+git clone https://github.com/zettagrid/zettagrid-vmware-mcp.git
 cd zettagrid-vmware-mcp
 ```
 
