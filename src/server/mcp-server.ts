@@ -12,7 +12,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { ZettagridClient } from '../client/zettagrid-client.js';
-import { McpToolResponse } from '../types.js';
+import { McpToolResponse, VdcResourceSummary } from '../types.js';
 
 export class ZettagridMcpServer {
   private server: Server;
@@ -20,6 +20,117 @@ export class ZettagridMcpServer {
 
   constructor(server: Server) {
     this.server = server;
+  }
+
+  /**
+   * Format VDC resources as a markdown table
+   */
+  private formatVdcResourcesTable(summary: VdcResourceSummary): string {
+    const { vdcName, resources } = summary;
+    
+    // Create the table header
+    const header = `# VDC: ${vdcName}\n\n`;
+    
+    // Build markdown table
+    let table = header;
+    
+    // Header row
+    table += '| Resource | Allocated | Used | Available | Utilization |\n';
+    table += '|----------|-----------|------|-----------|-------------|\n';
+    
+    // Data rows
+    const rows = [resources.ram, resources.vcpu, resources.storage];
+    for (const row of rows) {
+      const resourceWithUnit = `${row.resource} (${row.units})`;
+      table += `| ${resourceWithUnit} | ${row.allocated} | ${row.used} | ${row.available} | ${row.utilization} |\n`;
+    }
+    
+    return table;
+  }
+
+  /**
+   * Handle showing all VDC resources in a consolidated table
+   */
+  private async handleShowAllVdcResources(zoneId?: string): Promise<McpToolResponse<string>> {
+    try {
+      if (!this.client) {
+        this.client = new ZettagridClient();
+      }
+
+      // First get list of all VDCs
+      const vdcsResponse = await this.client.listVdcs(zoneId);
+      
+      if (!vdcsResponse.success || !vdcsResponse.data?.items?.length) {
+        return {
+          success: false,
+          error: {
+            code: 'NO_VDCS_FOUND',
+            message: 'No VDCs found or failed to list VDCs'
+          }
+        };
+      }
+
+      // Get resources for each VDC
+      const vdcResourcePromises = vdcsResponse.data.items.map(async (vdc) => {
+        // Use the real VDC ID from href
+        const realVdcId = vdc.href?.split('/').pop();
+        if (realVdcId) {
+          const resourceResponse = await this.client!.showVdcResources(realVdcId, zoneId);
+          return resourceResponse.success ? resourceResponse.data : null;
+        }
+        return null;
+      });
+
+      const vdcResources = await Promise.all(vdcResourcePromises);
+      const validResources = vdcResources.filter(Boolean) as VdcResourceSummary[];
+
+      if (validResources.length === 0) {
+        return {
+          success: false,
+          error: {
+            code: 'NO_RESOURCE_DATA',
+            message: 'Failed to retrieve resource data for any VDCs'
+          }
+        };
+      }
+
+      // Create consolidated markdown table
+      const header = `# VDC Resource Summary - ${zoneId || 'Default Zone'}\n\n`;
+      let table = header;
+      
+      // Table headers
+      table += '| VDC Name | RAM Allocated | RAM Used | RAM Util | CPU Allocated | CPU Used | CPU Util | Storage Allocated | Storage Used | Storage Util |\n';
+      table += '|----------|---------------|----------|----------|---------------|----------|----------|-------------------|--------------|---------------|\n';
+      
+      // Add rows for each VDC
+      for (const vdcResource of validResources) {
+        const { vdcName, resources } = vdcResource;
+        const ram = resources.ram;
+        const cpu = resources.vcpu;
+        const storage = resources.storage;
+        
+        table += `| ${vdcName} | ${ram.allocated} ${ram.units} | ${ram.used} ${ram.units} | ${ram.utilization} | ${cpu.allocated} ${cpu.units} | ${cpu.used} ${cpu.units} | ${cpu.utilization} | ${storage.allocated} ${storage.units} | ${storage.used} ${storage.units} | ${storage.utilization} |\n`;
+      }
+
+      return {
+        success: true,
+        data: table,
+        metadata: {
+          zone: zoneId || 'default',
+          organization: 'unknown', // Will be filled by client
+          timestamp: new Date().toISOString()
+        }
+      };
+
+    } catch (error) {
+      return {
+        success: false,
+        error: {
+          code: 'SHOW_ALL_VDC_RESOURCES_ERROR',
+          message: error instanceof Error ? error.message : 'Failed to show all VDC resources'
+        }
+      };
+    }
   }
 
   /**
@@ -133,6 +244,20 @@ export class ZettagridMcpServer {
               }
             },
             required: ['vdcId']
+          }
+        },
+        {
+          name: 'show_all_vdc_resources',
+          description: 'Show all VDC resource allocation and usage in a consolidated markdown table',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              zoneId: {
+                type: 'string',
+                description: 'Zone ID (optional)',
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+              }
+            }
           }
         },
         {
@@ -408,6 +533,7 @@ export class ZettagridMcpServer {
 
       try {
         let result: McpToolResponse;
+        let responseText: string | undefined;
 
         switch (name) {
           case 'test_zone':
@@ -432,6 +558,16 @@ export class ZettagridMcpServer {
 
           case 'show_vdc_resources':
             result = await this.client.showVdcResources(args?.vdcId as string, args?.zoneId as string | undefined);
+            if (result.success && result.data) {
+              responseText = this.formatVdcResourcesTable(result.data as VdcResourceSummary);
+            }
+            break;
+
+          case 'show_all_vdc_resources':
+            result = await this.handleShowAllVdcResources(args?.zoneId as string | undefined);
+            if (result.success && result.data) {
+              responseText = result.data as string;
+            }
             break;
 
           case 'list_vapps':
@@ -515,11 +651,12 @@ export class ZettagridMcpServer {
             );
         }
 
+        // Use formatted text if available, otherwise return JSON
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify(result, null, 2)
+              text: responseText || JSON.stringify(result, null, 2)
             }
           ]
         };

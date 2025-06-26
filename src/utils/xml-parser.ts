@@ -198,7 +198,7 @@ function extractAttribute(xmlElement: string, attributeName: string): string {
 /**
  * Extract ID from href URL
  */
-function extractIdFromHref(href: string): string {
+export function extractIdFromHref(href: string): string {
   if (!href) return '';
   
   // Extract UUID or ID from URLs like:
@@ -209,6 +209,21 @@ function extractIdFromHref(href: string): string {
   // Extract from URLs ending with IDs
   const parts = href.split('/');
   return parts[parts.length - 1] || '';
+}
+
+/**
+ * Normalize input to extract ID from either href URL or direct ID
+ */
+export function normalizeIdFromHrefOrId(input: string): string {
+  if (!input) return '';
+  
+  // If it looks like a URL/href, extract the ID
+  if (input.includes('/') && (input.startsWith('http') || input.includes('api/'))) {
+    return extractIdFromHref(input);
+  }
+  
+  // Otherwise assume it's already an ID
+  return input;
 }
 
 /**

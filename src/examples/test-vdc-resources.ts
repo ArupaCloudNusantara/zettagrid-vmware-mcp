@@ -1,28 +1,46 @@
-#!/usr/bin/env tsx
+#!/usr/bin/env npx tsx
+
 /**
- * Test VDC resources tool
- * Usage: npx tsx src/examples/test-vdc-resources.ts [vdcId] [zoneId]
+ * Test script for VDC resources functionality
  */
 
+import { readFileSync } from 'fs';
 import { ZettagridClient } from '../client/zettagrid-client.js';
-import { config } from 'dotenv';
+import type { VdcResourceSummary } from '../types.js';
+
+// Simple .env file loader
+function loadEnvFile() {
+  try {
+    const envContent = readFileSync('.env', 'utf8');
+    const lines = envContent.split('\n');
+    
+    lines.forEach(line => {
+      const trimmed = line.trim();
+      if (trimmed && !trimmed.startsWith('#')) {
+        const [key, ...valueParts] = trimmed.split('=');
+        if (key && valueParts.length > 0) {
+          const value = valueParts.join('=').trim();
+          process.env[key.trim()] = value;
+        }
+      }
+    });
+  } catch (error) {
+    console.warn('Warning: Could not load .env file:', error instanceof Error ? error.message : error);
+  }
+}
 
 // Load environment variables
-config();
+loadEnvFile();
 
-const ZONE = 'perth'; // Default testing zone
+const ZONE = 'perth';
 
-function formatTable(data: any): string {
-  if (!data.resources) return 'No resource data available';
-
-  const { ram, vcpu, storage } = data.resources;
-  
-  // Create table headers
+// Format the resource data as a table
+function formatTable(data: VdcResourceSummary): string {
   const headers = ['Resource', 'Units', 'Allocated', 'Used', 'Available', 'Utilization'];
   const rows = [
-    [ram.resource, ram.units, ram.allocated, ram.used, ram.available, ram.utilization],
-    [vcpu.resource, vcpu.units, vcpu.allocated, vcpu.used, vcpu.available, vcpu.utilization],
-    [storage.resource, storage.units, storage.allocated, storage.used, storage.available, storage.utilization]
+    ['RAM', data.resources.ram.units, data.resources.ram.allocated, data.resources.ram.used, data.resources.ram.available, data.resources.ram.utilization],
+    ['vCPU', data.resources.vcpu.units, data.resources.vcpu.allocated, data.resources.vcpu.used, data.resources.vcpu.available, data.resources.vcpu.utilization],
+    ['Storage', data.resources.storage.units, data.resources.storage.allocated, data.resources.storage.used, data.resources.storage.available, data.resources.storage.utilization]
   ];
 
   // Calculate column widths
@@ -43,6 +61,70 @@ function formatTable(data: any): string {
   ].join('\n');
 }
 
+async function testSingleVdc(client: ZettagridClient, vdcId: string, zoneId: string) {
+  const resourcesResult = await client.showVdcResources(vdcId, zoneId);
+  
+  if (resourcesResult.error) {
+    console.error('❌ Failed to get VDC resources:', resourcesResult.error.message);
+    if (resourcesResult.error.details) {
+      console.log('   Details:', JSON.stringify(resourcesResult.error.details, null, 2));
+    }
+    return;
+  }
+  
+  if (!resourcesResult.data) {
+    console.log('❌ No resource data returned');
+    return;
+  }
+  
+  const data = resourcesResult.data;
+  
+  // Display VDC information
+  console.log(`\n🏢 VDC Information:`);
+  console.log(`   Name: ${data.vdcName}`);
+  console.log(`   ID: ${data.vdcId}`);
+  console.log(`   Zone: ${resourcesResult.metadata?.zone || zoneId}`);
+  
+  // Display resource table
+  console.log(`\n📋 Resource Allocation & Usage:`);
+  console.log(formatTable(data));
+  
+  // Display additional insights
+  console.log(`\n💡 Resource Insights:`);
+  
+  const ramUtil = parseFloat(data.resources.ram.utilization);
+  const cpuUtil = parseFloat(data.resources.vcpu.utilization);
+  const storageUtil = parseFloat(data.resources.storage.utilization);
+  
+  if (ramUtil > 80) {
+    console.log(`   ⚠️  RAM utilization is high (${data.resources.ram.utilization})`);
+  } else if (ramUtil > 0) {
+    console.log(`   ✅ RAM utilization is healthy (${data.resources.ram.utilization})`);
+  } else {
+    console.log(`   💤 No RAM currently in use`);
+  }
+  
+  if (cpuUtil > 80) {
+    console.log(`   ⚠️  vCPU utilization is high (${data.resources.vcpu.utilization})`);
+  } else if (cpuUtil > 0) {
+    console.log(`   ✅ vCPU utilization is healthy (${data.resources.vcpu.utilization})`);
+  } else {
+    console.log(`   💤 No vCPU currently in use`);
+  }
+  
+  if (storageUtil > 90) {
+    console.log(`   ⚠️  Storage utilization is very high (${data.resources.storage.utilization})`);
+  } else if (storageUtil > 0) {
+    console.log(`   ✅ Storage utilization is normal (${data.resources.storage.utilization})`);
+  } else {
+    console.log(`   💤 No storage currently in use`);
+  }
+  
+  // Raw data for debugging
+  console.log(`\n🔍 Raw Response Data:`);
+  console.log(JSON.stringify(data, null, 2));
+}
+
 async function testVdcResources(vdcId?: string, zoneId: string = ZONE) {
   console.log('📊 Testing VDC Resources Tool');
   console.log('=============================');
@@ -54,7 +136,7 @@ async function testVdcResources(vdcId?: string, zoneId: string = ZONE) {
   try {
     console.log('✅ Client created successfully\n');
     
-    // If no VDC ID provided, list VDCs first
+    // If no VDC ID provided, list VDCs first and test all
     if (!vdcId) {
       console.log('🔍 No VDC ID provided, listing available VDCs...');
       const vdcs = await client.listVdcs(zoneId);
@@ -74,101 +156,31 @@ async function testVdcResources(vdcId?: string, zoneId: string = ZONE) {
         console.log(`   ${index + 1}. ${vdc.name} (${vdc.id})`);
       });
       
-      // Use the first VDC
-      vdcId = vdcs.data.items[0].id;
-      console.log(`\n🎯 Using first VDC: ${vdcs.data.items[0].name} (${vdcId})\n`);
-    }
-    
-    // Test the show_vdc_resources tool
-    console.log(`📊 Testing show_vdc_resources for VDC: ${vdcId}`);
-    console.log('=' .repeat(60));
-    
-    const resourcesResult = await client.showVdcResources(vdcId, zoneId);
-    
-    if (resourcesResult.error) {
-      console.error('❌ Failed to get VDC resources:', resourcesResult.error.message);
-      if (resourcesResult.error.details) {
-        console.log('   Details:', JSON.stringify(resourcesResult.error.details, null, 2));
+      // Test all VDCs
+      console.log('\n🎯 Testing all VDCs:\n');
+      
+      for (let i = 0; i < vdcs.data.items.length; i++) {
+        const vdc = vdcs.data.items[i];
+        console.log(`📊 VDC ${i + 1}: ${vdc.name} (${vdc.id})`);
+        console.log('=' + '='.repeat(60));
+        
+        await testSingleVdc(client, vdc.id, zoneId);
+        console.log('\n');
       }
       return;
     }
     
-    if (!resourcesResult.data) {
-      console.log('❌ No resource data returned');
-      return;
-    }
-    
-    const data = resourcesResult.data;
-    
-    // Display VDC information
-    console.log(`\n🏢 VDC Information:`);
-    console.log(`   Name: ${data.vdcName}`);
-    console.log(`   ID: ${data.vdcId}`);
-    if (data.allocationModel) {
-      console.log(`   Allocation Model: ${data.allocationModel}`);
-    }
-    console.log(`   Zone: ${resourcesResult.metadata?.zone || zoneId}`);
-    
-    // Display resource table
-    console.log(`\n📋 Resource Allocation & Usage:`);
-    console.log(formatTable(data));
-    
-    // Display additional insights
-    console.log(`\n💡 Resource Insights:`);
-    
-    const ramUtil = parseFloat(data.resources.ram.utilization);
-    const cpuUtil = parseFloat(data.resources.vcpu.utilization);
-    const storageUtil = parseFloat(data.resources.storage.utilization);
-    
-    if (ramUtil > 80) {
-      console.log(`   ⚠️  RAM utilization is high (${data.resources.ram.utilization})`);
-    } else if (ramUtil > 0) {
-      console.log(`   ✅ RAM utilization is healthy (${data.resources.ram.utilization})`);
-    }
-    
-    if (cpuUtil > 80) {
-      console.log(`   ⚠️  vCPU utilization is high (${data.resources.vcpu.utilization})`);
-    } else if (cpuUtil > 0) {
-      console.log(`   ✅ vCPU utilization is healthy (${data.resources.vcpu.utilization})`);
-    }
-    
-    if (storageUtil > 80) {
-      console.log(`   ⚠️  Storage utilization is high (${data.resources.storage.utilization})`);
-    } else if (storageUtil > 0) {
-      console.log(`   ✅ Storage utilization is healthy (${data.resources.storage.utilization})`);
-    }
-    
-    // Show raw data for debugging
-    console.log(`\n🔍 Raw Response Data:`);
-    console.log(JSON.stringify(data, null, 2));
-    
-    console.log(`\n✅ Test completed successfully at ${new Date().toISOString()}`);
+    // Test single VDC if ID was provided
+    console.log(`📊 Testing show_vdc_resources for VDC: ${vdcId}`);
+    console.log('=' + '='.repeat(60));
+    await testSingleVdc(client, vdcId, zoneId);
     
   } catch (error) {
-    console.error('\n❌ Unexpected error:', error);
+    console.error('❌ Test failed:', error);
   }
-}
-
-// Parse command line arguments
-const args = process.argv.slice(2);
-const [vdcId, zoneId] = args;
-
-if (args.includes('--help') || args.includes('-h')) {
-  console.log('VDC Resources Tool Test');
-  console.log('=======================');
-  console.log('Usage: npx tsx src/examples/test-vdc-resources.ts [vdcId] [zoneId]');
-  console.log('');
-  console.log('Parameters:');
-  console.log('  vdcId   - VDC ID (optional, will list available VDCs if not provided)');
-  console.log('  zoneId  - Zone ID (optional, defaults to "perth")');
-  console.log('');
-  console.log('Examples:');
-  console.log('  npx tsx src/examples/test-vdc-resources.ts');
-  console.log('  npx tsx src/examples/test-vdc-resources.ts d8407649-b53a-4e47-befd-2e7110db33e0');
-  console.log('  npx tsx src/examples/test-vdc-resources.ts d8407649-b53a-4e47-befd-2e7110db33e0 perth');
-  process.exit(0);
+  
+  console.log(`\n✅ Test completed successfully at ${new Date().toISOString()}`);
 }
 
 // Run the test
-console.log('Starting VDC resources test...\n');
-testVdcResources(vdcId, zoneId || ZONE).catch(console.error);
+await testVdcResources();

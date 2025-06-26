@@ -18,8 +18,6 @@ import {
   EdgeGateway,
   FirewallRule,
   VdcResourceSummary,
-  VdcResourceTable,
-  VdcResourceRow,
   EdgeNetworkConfig,
   ExternalIPInfo,
   EdgeGatewayInterfaceInfo,
@@ -33,7 +31,7 @@ import {
 import { 
   parseVdcRecords, 
   parseVMRecords,
-  parseQueryResults
+  normalizeIdFromHrefOrId
 } from '../utils/xml-parser.js';
 
 export class ZettagridClient {
@@ -355,184 +353,128 @@ export class ZettagridClient {
   }
 
   /**
-   * Show VDC resources in table format
+   * Show VDC resources with actual usage data
+   * @param vdcIdOrHref - VDC ID or href URL 
+   * @param zoneId - Optional zone ID
    */
-  async showVdcResources(vdcId: string, zoneId?: string): Promise<McpToolResponse<VdcResourceSummary>> {
+  async showVdcResources(vdcIdOrHref: string, zoneId?: string): Promise<McpToolResponse<VdcResourceSummary>> {
+    const vdcId = normalizeIdFromHrefOrId(vdcIdOrHref);
+    
     try {
-      // Try to get VDC resource information using query API instead of direct VDC access
-      // First try the adminOrgVdc query which includes resource information
-      let response;
+      // Get VDC details directly - this contains ComputeCapacity XML
+      const vdcResponse = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vdc/${vdcId}`
+      }, zoneId);
+
+      if (!vdcResponse.data) {
+        throw new Error('No VDC data received');
+      }
+
+      // Parse the VDC XML to extract name and ComputeCapacity
+      const xmlData = vdcResponse.data;
       let vdcName = 'Unknown VDC';
+      let memoryAllocatedMB = 0;
+      let memoryUsedMB = 0;
+      let cpuAllocatedMhz = 0;
+      let cpuUsedMhz = 0;
+
+      // Extract VDC name
+      const nameMatch = xmlData.match(/name="([^"]+)"/);
+      if (nameMatch && nameMatch[1]) {
+        vdcName = nameMatch[1];
+      }
+
+      // Extract ComputeCapacity CPU values
+      const cpuMatch = xmlData.match(/<Cpu>[\s\S]*?<Allocated>(\d+)<\/Allocated>[\s\S]*?<Used>(\d+)<\/Used>[\s\S]*?<\/Cpu>/);
+      if (cpuMatch && cpuMatch[1] && cpuMatch[2]) {
+        cpuAllocatedMhz = parseInt(cpuMatch[1], 10);
+        cpuUsedMhz = parseInt(cpuMatch[2], 10);
+      }
+
+      // Extract ComputeCapacity Memory values
+      const memoryMatch = xmlData.match(/<Memory>[\s\S]*?<Allocated>(\d+)<\/Allocated>[\s\S]*?<Used>(\d+)<\/Used>[\s\S]*?<\/Memory>/);
+      if (memoryMatch && memoryMatch[1] && memoryMatch[2]) {
+        memoryAllocatedMB = parseInt(memoryMatch[1], 10);
+        memoryUsedMB = parseInt(memoryMatch[2], 10);
+      }
+
+      // Get storage statistics from orgVdcStorageProfile query
+      let storageAllocatedMB = 0;
+      let storageUsedMB = 0;
       
-      // Try different query approaches to get VDC resource information
-      let resourceData: any = null;
-      
-      // First try to find VDC in the normal VDC list to get available fields
       try {
-        response = await this.makeRequest<string>({
+        const storageResponse = await this.makeRequest<string>({
           method: 'GET',
-          url: `/query?type=orgVdc&filter=id==${vdcId}`
+          url: `/query?type=orgVdcStorageProfile&filter=vdc==${vdcId}`
         }, zoneId);
-        
-        const parsedOrgVdc = parseQueryResults(response.data);
-        
-        if (parsedOrgVdc.length > 0) {
-          resourceData = parsedOrgVdc[0];
-        }
-      } catch (orgError) {
-        // OrgVdc query failed, try other approaches
-      }
-      
-      // If regular orgVdc doesn't have resource info, try alternate approaches
-      if (!resourceData || (!resourceData.memoryAllocationMB && !resourceData.cpuAllocationMhz)) {
-        try {
-          // Try adminOrgVdc if we have admin privileges
-          response = await this.makeRequest<string>({
-            method: 'GET',
-            url: `/query?type=adminOrgVdc&filter=id==${vdcId}`
-          }, zoneId);
+
+        if (storageResponse.data) {
+          const storageXml = storageResponse.data;
           
-          const parsedAdminVdc = parseQueryResults(response.data);
+          // Extract storage values from OrgVdcStorageProfileRecord elements
+          const storageRecords = storageXml.match(/<OrgVdcStorageProfileRecord[^>]*\/>/g) || [];
           
-          if (parsedAdminVdc.length > 0) {
-            resourceData = parsedAdminVdc[0];
-          }
-        } catch (adminError) {
-          // AdminOrgVdc query failed, try VM aggregation
-        }
-      }
-      
-      // If still no resource data, try the VM approach - get VMs and aggregate their resources
-      if (!resourceData || (!resourceData.memoryAllocationMB && !resourceData.cpuAllocationMhz)) {
-        try {
-          // Get VMs in this VDC to estimate resources
-          const vmResponse = await this.makeRequest<string>({
-            method: 'GET',
-            url: `/query?type=vm&filter=vdc==${vdcId}&fields=name,memoryMB,numberOfCpus,status`
-          }, zoneId);
-          
-          const vmRecords = parseQueryResults(vmResponse.data);
-          
-          if (vmRecords.length > 0) {
-            // Calculate estimated resource usage from VMs
-            let totalMemoryMB = 0;
-            let totalCpus = 0;
-            let runningMemoryMB = 0;
-            let runningCpus = 0;
+          for (const record of storageRecords) {
+            const usedMatch = record.match(/storageUsedMB="(\d+)"/);
+            const limitMatch = record.match(/storageLimitMB="(\d+)"/);
             
-            vmRecords.forEach(vm => {
-              const memoryMB = typeof vm.memoryMB === 'number' ? vm.memoryMB : parseFloat(vm.memoryMB || '0');
-              const cpus = typeof vm.numberOfCpus === 'number' ? vm.numberOfCpus : parseFloat(vm.numberOfCpus || '0');
-              
-              totalMemoryMB += memoryMB;
-              totalCpus += cpus;
-              
-              // If VM is powered on (status 4 = SUSPENDED, 5 = POWERED_ON)
-              if (vm.status === 4 || vm.status === 5) {
-                runningMemoryMB += memoryMB;
-                runningCpus += cpus;
-              }
-            });
-            
-            // Create estimated resource data
-            resourceData = {
-              name: `VDC with ${vmRecords.length} VMs`,
-              id: vdcId,
-              // Estimate allocations (typically VDCs have more capacity than VM allocations)
-              memoryAllocationMB: Math.max(totalMemoryMB * 1.5, totalMemoryMB + 4096), // Add some overhead
-              memoryUsedMB: runningMemoryMB,
-              cpuAllocationMhz: Math.max(totalCpus * 2000, totalCpus * 1000 + 4000), // Estimate MHz per CPU
-              cpuUsedMhz: runningCpus * 1000, // Estimate MHz per running CPU
-              storageAllocationMB: totalMemoryMB * 4, // Rough estimate
-              storageUsedMB: totalMemoryMB * 2 // Rough estimate
-            };
+            if (usedMatch && usedMatch[1] && limitMatch && limitMatch[1]) {
+              storageUsedMB += parseInt(usedMatch[1], 10);
+              storageAllocatedMB += parseInt(limitMatch[1], 10);
+            }
           }
-        } catch (vmError) {
-          // VM aggregation also failed, but continue with empty data
         }
+      } catch (error) {
+        // Storage query failed, storage will show as 0
       }
-      
-      if (!resourceData) {
-        throw new Error('Unable to access VDC resource information through any available method');
-      }
-      
-      // Use the resourceData we found
-      const vdcRecord = resourceData;
-      vdcName = vdcRecord.name || 'Unknown VDC';
-      
-      // Helper function to format numbers  
-      const formatNumber = (value?: number | string): string => {
-        if (value === undefined || value === null || value === '') return 'N/A';
-        const numValue = typeof value === 'string' ? parseFloat(value) : value;
-        if (isNaN(numValue)) return 'N/A';
-        if (numValue >= 1024) return `${(numValue / 1024).toFixed(1)}`;
-        return numValue.toString();
+
+      // Helper functions
+      const formatNumber = (value: number): string => {
+        return value.toFixed(1);
       };
 
-      // Helper function to calculate utilization percentage
-      const calculateUtilization = (used?: number | string, allocated?: number | string): string => {
-        const usedNum = typeof used === 'string' ? parseFloat(used) : used;
-        const allocatedNum = typeof allocated === 'string' ? parseFloat(allocated) : allocated;
-        if (!usedNum || !allocatedNum || allocatedNum === 0) return '0%';
-        return `${Math.round((usedNum / allocatedNum) * 100)}%`;
+      const calculateUtilization = (used: number, allocated: number): string => {
+        if (allocated === 0) return '0%';
+        return Math.round((used / allocated) * 100) + '%';
       };
 
-      // Extract resource values from the query response
-      const memoryAllocatedMB = vdcRecord.memoryAllocationMB;
-      const memoryUsedMB = vdcRecord.memoryUsedMB;
-      const cpuAllocatedMhz = vdcRecord.cpuAllocationMhz;
-      const cpuUsedMhz = vdcRecord.cpuUsedMhz;
-      const storageAllocatedMB = vdcRecord.storageAllocationMB;
-      const storageUsedMB = vdcRecord.storageUsedMB;
-
-      // Process RAM (Memory) - Convert MB to GB
-      const ramRow: VdcResourceRow = {
-        resource: 'RAM',
-        units: 'GB',
-        allocated: memoryAllocatedMB ? formatNumber(parseFloat(memoryAllocatedMB) / 1024) : 'N/A',
-        used: memoryUsedMB ? formatNumber(parseFloat(memoryUsedMB) / 1024) : 'N/A',
-        available: memoryAllocatedMB && memoryUsedMB ? 
-          formatNumber((parseFloat(memoryAllocatedMB) - parseFloat(memoryUsedMB)) / 1024) : 'N/A',
-        utilization: calculateUtilization(memoryUsedMB, memoryAllocatedMB)
-      };
-
-      // Process vCPU (keep in MHz)
-      const vcpuRow: VdcResourceRow = {
-        resource: 'vCPU',
-        units: 'MHz',
-        allocated: formatNumber(cpuAllocatedMhz),
-        used: formatNumber(cpuUsedMhz),
-        available: cpuAllocatedMhz && cpuUsedMhz ? 
-          formatNumber(parseFloat(cpuAllocatedMhz) - parseFloat(cpuUsedMhz)) : 'N/A',
-        utilization: calculateUtilization(cpuUsedMhz, cpuAllocatedMhz)
-      };
-
-      // Process Storage - Convert MB to GB
-      const storageRow: VdcResourceRow = {
-        resource: 'Storage',
-        units: 'GB',
-        allocated: storageAllocatedMB ? formatNumber(parseFloat(storageAllocatedMB) / 1024) : 'N/A',
-        used: storageUsedMB ? formatNumber(parseFloat(storageUsedMB) / 1024) : 'N/A',
-        available: storageAllocatedMB && storageUsedMB ? 
-          formatNumber((parseFloat(storageAllocatedMB) - parseFloat(storageUsedMB)) / 1024) : 'N/A',
-        utilization: calculateUtilization(storageUsedMB, storageAllocatedMB)
-      };
-
-      // Create resource table
-      const resourceTable: VdcResourceTable = {
-        ram: ramRow,
-        vcpu: vcpuRow,
-        storage: storageRow
-      };
-
-      // Create summary
+      // Build the summary with actual parsed values
       const summary: VdcResourceSummary = {
-        vdcId: vdcId,
-        vdcName: vdcName,
-        resources: resourceTable
+        vdcId,
+        vdcName,
+        resources: {
+          ram: {
+            resource: 'RAM',
+            units: 'GB',
+            allocated: formatNumber(memoryAllocatedMB / 1024),
+            used: formatNumber(memoryUsedMB / 1024),
+            available: formatNumber((memoryAllocatedMB - memoryUsedMB) / 1024),
+            utilization: calculateUtilization(memoryUsedMB, memoryAllocatedMB)
+          },
+          vcpu: {
+            resource: 'vCPU',
+            units: 'MHz',
+            allocated: formatNumber(cpuAllocatedMhz),
+            used: formatNumber(cpuUsedMhz),
+            available: formatNumber(cpuAllocatedMhz - cpuUsedMhz),
+            utilization: calculateUtilization(cpuUsedMhz, cpuAllocatedMhz)
+          },
+          storage: {
+            resource: 'Storage',
+            units: 'GB',
+            allocated: storageAllocatedMB > 0 ? formatNumber(storageAllocatedMB / 1024) : 'N/A',
+            used: storageUsedMB > 0 ? formatNumber(storageUsedMB / 1024) : 'N/A',
+            available: (storageAllocatedMB > 0 && storageUsedMB >= 0) ? 
+              formatNumber((storageAllocatedMB - storageUsedMB) / 1024) : 'N/A',
+            utilization: (storageAllocatedMB > 0) ? 
+              calculateUtilization(storageUsedMB, storageAllocatedMB) : 'N/A'
+          }
+        }
       };
-
+      
       return this.formatMcpResponse(summary, zoneId || this.zoneManager.getConfig().defaultZone);
+      
     } catch (error) {
       return this.formatMcpResponse({} as VdcResourceSummary, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'SHOW_VDC_RESOURCES_ERROR',
