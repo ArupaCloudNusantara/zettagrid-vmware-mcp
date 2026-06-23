@@ -1,458 +1,346 @@
 # Zettagrid VMware MCP Server
 
-A comprehensive Model Context Protocol (MCP) server for managing Zettagrid's VMware Cloud Director infrastructure across all Australian zones. This server enables AI assistants to perform complete tenant organization administration through the Cloud Director API.
+> **Community fork** of [Zettagrid/zettagrid-vmware-mcp](https://github.com/Zettagrid/zettagrid-vmware-mcp) v1.0.0.  
+> Fork version: **v1.1.0** — 50 tools, Indonesia zones (Jakarta, Cibitung), full firewall/NAT CRUD, VM resize/reset, vApp delete/undeploy, task polling, Docker transport. All original Australian zones and tools are fully preserved.
 
-## Features
-
-- **Multi-Zone Support**: Manage resources across all Australian Zettagrid zones (Sydney, Melbourne, Perth, Brisbane, Adelaide, Darwin)
-- **Comprehensive API Coverage**: Full tenant organization lifecycle management
-- **OAuth Authentication**: Secure API token refresh and session management
-- **Type-Safe Operations**: Complete TypeScript implementation with vCloud Director schema compliance
-- **Error Handling**: Robust retry logic and graceful error recovery
-- **Performance Optimized**: Connection pooling, caching, and efficient API usage
-
-## Installation
-
-### Prerequisites
-
-- Node.js 18.0 or later
-- npm or yarn package manager
-- Valid Zettagrid API token and organization access - See token instructions https://customer.support.zettagrid.com/servicedesk/customer/portal/9/article/1270415361
-
-### Quick Start
-
-1. **Install the package**:
-```bash
-npm install @zettagrid/vmware-mcp
-```
-
-2. **Configure environment variables**:
-```bash
-cp .env.example .env
-# Edit .env with your Zettagrid credentials
-```
-
-3. **Run the MCP server**:
-```bash
-npm start
-```
-
-### Development Setup
-
-1. **Clone the repository**:
-```bash
-git clone https://github.com/zettagrid/zettagrid-vmware-mcp.git
-cd zettagrid-vmware-mcp
-```
-
-2. **Install dependencies**:
-```bash
-npm install
-```
-
-3. **Configure environment**:
-```bash
-cp .env.example .env
-# Configure your zone credentials (see Configuration section)
-```
-
-4. **Build the project**:
-```bash
-npm run build
-```
-
-5. **Run tests**:
-```bash
-npm test
-```
-
-## Configuration
-
-### Environment Variables
-
-Create a `.env` file with your Zettagrid zone configurations:
-
-```bash
-# Organization Configuration
-ZETTAGRID_ORGANIZATION=your-organization-name
-ZETTAGRID_DEFAULT_ZONE=perth
-ZETTAGRID_API_VERSION=39.1
-
-# Zone API Tokens (configure the zones you need)
-ZETTAGRID_API_TOKEN_PERTH=your-perth-api-token
-ZETTAGRID_API_TOKEN_SYDNEY=your-sydney-api-token
-ZETTAGRID_API_TOKEN_MELBOURNE=your-melbourne-api-token
-ZETTAGRID_API_TOKEN_BRISBANE=your-brisbane-api-token
-ZETTAGRID_API_TOKEN_ADELAIDE=your-adelaide-api-token
-ZETTAGRID_API_TOKEN_DARWIN=your-darwin-api-token
-
-# Performance Settings (optional)
-ZETTAGRID_TIMEOUT=30000
-ZETTAGRID_RETRY_ATTEMPTS=3
-ZETTAGRID_ENABLE_CACHING=true
-
-# Debug Settings (optional)
-DEBUG_LEVEL=info
-ZETTAGRID_DEBUG=false
-```
-
-**Note**: API and OAuth endpoints are automatically generated based on the standard Zettagrid format:
-- API endpoint: `https://mycloud.{zone-code}.zettagrid.com/api`
-- OAuth endpoint: `https://mycloud.{zone-code}.zettagrid.com/oauth/tenant/{org}/token`
-
-### All Supported Zones
-
-Configure any or all of the following Australian zones:
-
-| Zone | API Token Variable | Auto-Generated Endpoint |
-|------|-------------------|------------------------|
-| Sydney | `ZETTAGRID_API_TOKEN_SYDNEY` | `https://mycloud.syd.zettagrid.com/api` |
-| Melbourne | `ZETTAGRID_API_TOKEN_MELBOURNE` | `https://mycloud.mel.zettagrid.com/api` |
-| Perth | `ZETTAGRID_API_TOKEN_PERTH` | `https://mycloud.per.zettagrid.com/api` |
-| Brisbane | `ZETTAGRID_API_TOKEN_BRISBANE` | `https://mycloud.bri.zettagrid.com/api` |
-| Adelaide | `ZETTAGRID_API_TOKEN_ADELAIDE` | `https://mycloud.adl.zettagrid.com/api` |
-| Darwin | `ZETTAGRID_API_TOKEN_DARWIN` | `https://mycloud.dar.zettagrid.com/api` |
-
-## Usage
-
-### Testing Connectivity
-
-Test your configuration with the built-in connectivity test:
-
-```bash
-npm run test:connectivity
-# or manually:
-npx tsx src/examples/connectivity-test.ts
-```
-
-This will validate:
-- Zone configuration
-- Network connectivity  
-- OAuth authentication
-- Basic API operations
-- Health status
-
-### MCP Client Configuration
-
-#### Claude Desktop Configuration
-
-Add the Zettagrid MCP server to your Claude Desktop configuration:
-
-**macOS/Linux**: `~/Library/Application Support/Claude/claude_desktop_config.json`
-**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
-
-```json
-{
-  "mcpServers": {
-    "zettagrid-vmware": {
-      "command": "node",
-      "args": ["/path/to/zettagrid-vmware-mcp/build/index.js"],
-      "env": {
-        "ZETTAGRID_ORGANIZATION": "your-organization-name",
-        "ZETTAGRID_DEFAULT_ZONE": "perth",
-        "ZETTAGRID_API_VERSION": "39.1",
-        "ZETTAGRID_API_TOKEN_PERTH": "your-perth-token",
-        "ZETTAGRID_TIMEOUT": "30000",
-        "ZETTAGRID_RETRY_ATTEMPTS": "3",
-        "ZETTAGRID_ENABLE_CACHING": "true",
-        "DEBUG_LEVEL": "info"
-      }
-    }
-  }
-}
-```
-
-#### Cursor MCP Configuration
-
-Configure Cursor to use the Zettagrid MCP server by adding to your Cursor settings:
-
-**Cursor Settings** → **Extensions** → **MCP Servers**
-
-```json
-{
-  "mcp.servers": {
-    "zettagrid-vmware": {
-      "command": "node",
-      "args": ["/path/to/zettagrid-vmware-mcp/build/index.js"],
-      "env": {
-        "ZETTAGRID_ORGANIZATION": "your-organization-name",
-        "ZETTAGRID_DEFAULT_ZONE": "perth",
-        "ZETTAGRID_API_VERSION": "39.1",
-        "ZETTAGRID_API_TOKEN_PERTH": "your-perth-token",
-        "ZETTAGRID_TIMEOUT": "30000",
-        "ZETTAGRID_RETRY_ATTEMPTS": "3",
-        "ZETTAGRID_ENABLE_CACHING": "true",
-        "DEBUG_LEVEL": "info"
-      }
-    }
-  }
-}
-```
-
-#### Development Mode Configuration
-
-For development with `npm run dev`:
-
-```json
-{
-  "mcpServers": {
-    "zettagrid-vmware-dev": {
-      "command": "npx",
-      "args": ["tsx", "/path/to/zettagrid-vmware-mcp/src/index.ts"],
-      "cwd": "/path/to/zettagrid-vmware-mcp",
-      "env": {
-        "NODE_ENV": "development"
-      }
-    }
-  }
-}
-```
-
-#### Multi-Zone Configuration
-
-To configure multiple zones, add all zone credentials to the `env` section:
-
-```json
-{
-  "env": {
-    "ZETTAGRID_ORGANIZATION": "your-organization-name",
-    "ZETTAGRID_DEFAULT_ZONE": "perth",
-    "ZETTAGRID_API_VERSION": "39.1",
-    
-    "ZETTAGRID_API_TOKEN_SYDNEY": "your-sydney-token",
-    "ZETTAGRID_API_TOKEN_MELBOURNE": "your-melbourne-token",
-    "ZETTAGRID_API_TOKEN_PERTH": "your-perth-token",
-    "ZETTAGRID_API_TOKEN_BRISBANE": "your-brisbane-token",
-    "ZETTAGRID_API_TOKEN_ADELAIDE": "your-adelaide-token",
-    "ZETTAGRID_API_TOKEN_DARWIN": "your-darwin-token"
-  }
-}
-```
-
-### MCP Server Integration
-
-The server provides comprehensive MCP tools for cloud management:
-
-#### Organization Management
-- `list_organizations` - List all accessible organizations
-- `get_organization` - Get organization details and settings
-- `update_organization_settings` - Modify organization configuration
-
-#### Virtual Data Center (VDC) Operations
-- `list_vdcs` - List virtual data centers
-- `get_vdc` - Get VDC details and capabilities
-- `show_vdc_resources` - Show VDC resource allocation and usage table (RAM, vCPU, Storage)
-- `get_vdc_compute_policies` - Retrieve compute policies and limits
-
-#### vApp Lifecycle Management
-- `list_vapps` - List virtual applications
-- `get_vapp` - Get vApp configuration and status
-- `power_on_vapp` - Start vApp
-- `power_off_vapp` - Stop vApp
-- `deploy_vapp` - Deploy vApp from template
-
-#### Virtual Machine Operations
-- `list_vms` - List virtual machines
-- `get_vm` - Get VM details and configuration
-- `power_on_vm` - Start virtual machine
-- `power_off_vm` - Stop virtual machine
-- `get_vm_console` - Get VM console access ticket
-
-#### Storage Management
-- `list_disks` - List independent disks
-- `create_disk` - Create new storage disk
-- `attach_disk` - Attach disk to VM
-
-#### Network Configuration
-- `list_org_networks` - List organization networks
-- `create_org_network` - Create organization network
-
-#### Firewall and Security
-- `list_edge_gateways` - List edge gateways
-- `get_edge_gateway` - Get edge gateway details and configuration
-- `list_firewall_rules` - List firewall rules for an edge gateway
-- `create_firewall_rule` - Create new firewall rule
-
-### API Client Usage
-
-Use the Zettagrid client directly in your applications:
-
-```typescript
-import { ZettagridClient } from '@zettagrid/vmware-mcp';
-
-const client = new ZettagridClient();
-
-// List organizations
-const orgs = await client.listOrganizations('perth');
-console.log(orgs.data);
-
-// Get VDCs  
-const vdcs = await client.listVdcs('perth');
-console.log(vdcs.data);
-
-// Zone information
-const zoneInfo = await client.getZoneInfo('perth');
-console.log(zoneInfo.data);
-```
-
-## Authentication
-
-### OAuth Token Refresh Flow
-
-The server implements Zettagrid's OAuth authentication flow:
-
-1. **API Token**: Your initial Zettagrid API token
-2. **Token Refresh**: Automatically exchanges the API token for an access token via OAuth
-3. **Session Management**: Maintains authenticated sessions with automatic refresh
-4. **Multi-Zone**: Independent authentication per zone
-
-### Authentication Process
-
-```mermaid
-sequenceDiagram
-    participant Client as MCP Client
-    participant Server as Zettagrid MCP
-    participant OAuth as Zettagrid OAuth
-    participant API as vCloud Director API
-    
-    Client->>Server: Request (with zone)
-    Server->>OAuth: POST /oauth/tenant/{org}/token?grant_type=refresh_token&refresh_token={token}
-    OAuth->>Server: access_token + expires_in
-    Server->>API: API Request with Bearer {access_token}
-    API->>Server: API Response
-    Server->>Client: MCP Response
-```
-
-## Zone Management
-
-### Multi-Zone Operations
-
-The server supports operations across multiple zones:
-
-```typescript
-// Default zone operation
-const vdcs = await client.listVdcs();
-
-// Specific zone operation  
-const vdcsSydney = await client.listVdcs('sydney');
-const vdcsPerth = await client.listVdcs('perth');
-
-// Zone information
-const zones = client.getZoneInfo();
-console.log(zones.data.availableZones); // ['sydney', 'perth', ...]
-```
-
-### Zone Health Monitoring
-
-```typescript
-// Test zone connectivity
-const healthCheck = await client.getHealthStatus();
-console.log(healthCheck.data);
-
-// Test specific zone
-const zoneTest = await client.testZone('perth');
-console.log(zoneTest.data);
-```
-
-## Error Handling
-
-The server implements comprehensive error handling:
-
-### Automatic Retry
-- Network failures: 3 retry attempts with exponential backoff
-- Rate limiting: Automatic backoff and retry
-- Token expiration: Automatic re-authentication
-
-### Error Types
-- `ZONE_TEST_ERROR` - Zone connectivity issues
-- `GET_ORGANIZATION_ERROR` - Organization access problems  
-- `LIST_VDCS_ERROR` - VDC enumeration failures
-- `POWER_ON_VAPP_ERROR` - vApp power operation failures
-
-### Error Response Format
-```json
-{
-  "success": false,
-  "error": {
-    "code": "GET_VDC_ERROR",
-    "message": "Failed to get VDC",
-    "details": { ... }
-  },
-  "metadata": {
-    "zone": "perth",
-    "organization": "Org_cloud1100009", 
-    "timestamp": "2025-06-19T14:58:05.809Z"
-  }
-}
-```
-
-## Security
-
-### Best Practices
-- **Environment Variables**: Store all credentials in environment variables
-- **Token Security**: API tokens are automatically refreshed and never logged
-- **HTTPS Enforcement**: All communications use HTTPS/TLS
-- **Zone Isolation**: Authentication is isolated per zone
-- **Audit Logging**: All operations are logged for security auditing
-
-### Credential Management
-- Never commit API tokens to version control
-- Use different tokens per environment (dev/staging/prod)
-- Rotate API tokens regularly
-- Monitor token usage and access logs
-
-## Troubleshooting
-
-### Common Issues
-
-#### Authentication Failures
-```bash
-# Check token validity
-curl -X POST "https://mycloud.per.zettagrid.com/oauth/tenant/YourOrg/token?grant_type=refresh_token&refresh_token=YourToken" \
-  -H "Accept: application/json"
-```
-
-#### Zone Connectivity Issues
-```bash
-# Test zone endpoint
-npm run test:connectivity
-```
-
-#### Environment Configuration
-```bash
-# Validate environment variables
-node -e "console.log(process.env.ZETTAGRID_API_TOKEN_PERTH ? 'Token configured' : 'Token missing')"
-```
-
-### Debug Mode
-
-Enable detailed logging:
-```bash
-DEBUG_LEVEL=debug ZETTAGRID_DEBUG=true npm run dev
-```
-
-### Support
-
-- **Zettagrid**: This MCP server is not officially supported by Zettagrid and provided with warranties of no kind.
-- **Documentation**: This readme.md
-- **Issues**: Report bugs via GitHub Issues
-- **Community**: Join the discussion in GitHub Discussions
-
-## License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Changelog
-
-### v1.0.0 (2025-06-19)
-- Initial release
-- Multi-zone support for all Australian Zettagrid zones
-- OAuth authentication with automatic token refresh
-- Comprehensive vCloud Director API coverage
-- TypeScript implementation with full type safety
-- Live testing against Perth zone infrastructure
-- Complete MCP tool suite for cloud management
+A Model Context Protocol (MCP) server for managing VMware Cloud Director (VCD 10.5) infrastructure through AI assistants such as Claude. Covers the full tenant lifecycle: read, create, modify, delete across vApps, VMs, firewall, NAT, snapshots, and tasks.
 
 ---
 
-**Zettagrid VMware MCP Server** - Comprehensive cloud infrastructure management through AI assistants.
+## Supported Zones
+
+| Region | Zone | Token Variable | Endpoint |
+|--------|------|----------------|----------|
+| Australia | Sydney | `ZETTAGRID_API_TOKEN_SYDNEY` | `https://mycloud.syd.zettagrid.com/api` |
+| Australia | Melbourne | `ZETTAGRID_API_TOKEN_MELBOURNE` | `https://mycloud.mel.zettagrid.com/api` |
+| Australia | Perth | `ZETTAGRID_API_TOKEN_PERTH` | `https://mycloud.per.zettagrid.com/api` |
+| Australia | Brisbane | `ZETTAGRID_API_TOKEN_BRISBANE` | `https://mycloud.bri.zettagrid.com/api` |
+| Australia | Adelaide | `ZETTAGRID_API_TOKEN_ADELAIDE` | `https://mycloud.adl.zettagrid.com/api` |
+| Australia | Darwin | `ZETTAGRID_API_TOKEN_DARWIN` | `https://mycloud.dar.zettagrid.com/api` |
+| Indonesia | Jakarta | `ZETTAGRID_API_TOKEN_JAKARTA` | `https://mycloud-jkt.zettagrid.id/api` |
+| Indonesia | Cibitung | `ZETTAGRID_API_TOKEN_CIBITUNG` | `https://mycloud-cbt.zettagrid.id/api` |
+
+Configure only the zones you have access to. The server starts up cleanly with a single zone; unconfigured zones log a warning and are skipped.
+
+---
+
+## Installation
+
+**Prerequisites:** Node.js 18+, npm, a valid Zettagrid API token.  
+API tokens are issued per zone via the Zettagrid customer portal.
+
+```bash
+git clone https://github.com/YOUR-USERNAME/zettagrid-vmware-mcp.git
+cd zettagrid-vmware-mcp
+npm install
+cp .env.example .env   # edit with your credentials
+npm run build
+npm start
+```
+
+---
+
+## Configuration
+
+### `.env` — minimal (single zone)
+
+```bash
+ZETTAGRID_ORGANIZATION=your-org-name
+ZETTAGRID_DEFAULT_ZONE=jakarta
+
+# Only configure the zones you have:
+ZETTAGRID_API_TOKEN_JAKARTA=your-jakarta-token
+
+TRANSPORT=stdio   # or "http" for Docker
+```
+
+### `.env` — multi-zone
+
+```bash
+ZETTAGRID_ORGANIZATION=your-org-name
+ZETTAGRID_DEFAULT_ZONE=perth
+ZETTAGRID_API_VERSION=39.1
+
+ZETTAGRID_API_TOKEN_PERTH=your-perth-token
+ZETTAGRID_API_TOKEN_SYDNEY=your-sydney-token
+ZETTAGRID_API_TOKEN_JAKARTA=your-jakarta-token
+ZETTAGRID_API_TOKEN_CIBITUNG=your-cibitung-token
+
+TRANSPORT=stdio
+PORT=3001
+```
+
+---
+
+## MCP Client Configuration
+
+### Claude Desktop (stdio transport)
+
+`%APPDATA%\Claude\claude_desktop_config.json` (Windows)  
+`~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)
+
+```json
+{
+  "mcpServers": {
+    "zettagrid": {
+      "command": "node",
+      "args": ["/absolute/path/to/zettagrid-vmware-mcp/build/index.js"],
+      "env": {
+        "ZETTAGRID_ORGANIZATION": "your-org-name",
+        "ZETTAGRID_DEFAULT_ZONE": "jakarta",
+        "ZETTAGRID_API_TOKEN_JAKARTA": "your-jakarta-token",
+        "ZETTAGRID_API_VERSION": "39.1"
+      }
+    }
+  }
+}
+```
+
+### Claude Code (HTTP transport via Docker)
+
+```json
+{
+  "mcpServers": {
+    "zettagrid": {
+      "type": "http",
+      "url": "http://localhost:3001/mcp"
+    }
+  }
+}
+```
+
+### Docker Deployment (HTTP transport)
+
+```bash
+cp .env.example .env   # fill in credentials, set TRANSPORT=http
+docker compose up -d --build
+curl http://localhost:3001/health
+```
+
+`compose.yml` binds to `127.0.0.1:3001` by default — expose externally via Tailscale or an SSH tunnel.
+
+---
+
+## Tool Reference — 50 Tools
+
+### Zone (3)
+
+| Tool | Description |
+|------|-------------|
+| `test_zone` | Verify connectivity and auth to a zone |
+| `get_zone_info` | List all configured zones with their codes and default |
+| `get_zone_health` | Latency and auth health across all configured zones |
+
+### Organization (2)
+
+| Tool | Description |
+|------|-------------|
+| `list_organizations` | List orgs accessible to the token |
+| `get_organization` | Org details, full name, and settings |
+
+### VDC (4)
+
+| Tool | Description |
+|------|-------------|
+| `list_vdcs` | List Virtual Data Centers |
+| `get_vdc` | VDC details and storage profiles |
+| `show_vdc_resources` | CPU, RAM, storage usage percentages |
+| `show_all_vdc_resources` | Resources across all VDCs (server aggregate) |
+
+### vApp (6)
+
+| Tool | Description |
+|------|-------------|
+| `list_vapps` | List all vApps with status |
+| `get_vapp` | vApp details, VMs inside, deployment status |
+| `power_on_vapp` | Power on a vApp |
+| `power_off_vapp` | Power off a vApp (hard) |
+| `create_vapp` | Deploy a vApp from a catalog template |
+| `delete_vapp` | Delete a vApp — automatically undeployes first if needed |
+| `undeploy_vapp` | Undeploy a vApp from ESXi hosts without deleting data |
+
+### VM (13)
+
+| Tool | Description |
+|------|-------------|
+| `list_vms` | List VMs across all vApps |
+| `get_vm` | VM details: CPU, RAM, status, OS, network |
+| `get_vm_console` | WebMKS console ticket for browser access |
+| `get_vm_metrics` | Real-time CPU/RAM usage (requires VCD metrics endpoint) |
+| `power_on_vm` | Power on a VM |
+| `power_off_vm` | Hard power off (no OS involvement) |
+| `shutdown_vm` | Graceful guest OS shutdown (requires VMware Tools) |
+| `reboot_vm` | Graceful guest OS reboot (requires VMware Tools) |
+| `suspend_vm` | Suspend VM to disk |
+| `reset_vm` | Hard reset — for unresponsive VMs, no VMware Tools required |
+| `update_vm_cpu` | Change vCPU count — **VM must be powered off** |
+| `update_vm_memory` | Change RAM (MB) — **VM must be powered off** |
+
+### Snapshot (4)
+
+| Tool | Description |
+|------|-------------|
+| `list_snapshots` | List VM snapshots |
+| `create_snapshot` | Create a snapshot |
+| `revert_snapshot` | Revert to current snapshot |
+| `remove_snapshots` | Remove all snapshots for a VM |
+
+### Disk & Task (3)
+
+| Tool | Description |
+|------|-------------|
+| `list_disks` | List named independent disks |
+| `list_tasks` | List recent async tasks with status |
+| `get_task` | Poll a specific task by ID — enables AI async loops |
+
+### Catalog (2)
+
+| Tool | Description |
+|------|-------------|
+| `list_catalogs` | List catalogs in the organization |
+| `list_catalog_items` | List vApp templates in a catalog (provides `templateHref` for `create_vapp`) |
+
+### Network (3)
+
+| Tool | Description |
+|------|-------------|
+| `list_org_networks` | List organization VDC networks |
+| `list_external_networks` | List provider networks (provider token required; returns 4xx for tenant) |
+| `get_provider_network_info` | Provider network details (provider token required) |
+
+### Edge Gateway (3)
+
+| Tool | Description |
+|------|-------------|
+| `list_edge_gateways` | List NSX-T edge gateways |
+| `get_edge_gateway` | Edge gateway details and status |
+| `show_edge_network_config` | Summarized config: external IPs, NAT count, FW count |
+
+### Firewall (4)
+
+| Tool | Description |
+|------|-------------|
+| `list_firewall_rules` | List all firewall rules including the default rule |
+| `create_firewall_rule` | Create a new firewall rule |
+| `update_firewall_rule` | Update an existing rule (name, policy, enabled, IPs) |
+| `delete_firewall_rule` | Delete a firewall rule by ID |
+
+### NAT (3)
+
+| Tool | Description |
+|------|-------------|
+| `list_nat_rules` | List all DNAT/SNAT rules |
+| `create_nat_rule` | Create a DNAT or SNAT rule |
+| `delete_nat_rule` | Delete a NAT rule by ID |
+
+---
+
+## Transport Modes
+
+| Mode | `TRANSPORT` | Use case |
+|------|-------------|----------|
+| `stdio` | `stdio` (default) | Claude Desktop, Cursor — subprocess, no network exposure |
+| `http` | `http` | Docker, remote Claude Code, SSH tunnel access |
+
+HTTP endpoints (when `TRANSPORT=http`):
+- `GET /health` — server status and tool count
+- `POST /mcp` — MCP JSON-RPC (StreamableHTTPServerTransport)
+
+---
+
+## Authentication
+
+The server exchanges your Zettagrid API token for a short-lived OAuth access token automatically:
+
+```
+POST https://mycloud-{zone}.zettagrid.id/oauth/tenant/{org}/token
+  ?grant_type=refresh_token&refresh_token={api_token}
+```
+
+Sessions are cached and refreshed transparently. No additional auth setup is needed beyond providing the API token.
+
+---
+
+## Troubleshooting
+
+**Zone not configured warning on startup** — only the zones with a configured `ZETTAGRID_API_TOKEN_{ZONE}` variable will be active. Others log warnings and are skipped. This is expected behavior.
+
+**VM resize fails** — `update_vm_cpu` and `update_vm_memory` require the VM to be in **powered-off** state (status 8). Use `get_vm` to check status before calling.
+
+**NAT/FW operations return `BUSY_ENTITY`** — NSX-T edge gateways need ~20 seconds to realize changes. If you chain firewall and NAT writes in quick succession, the second call may fail with BUSY_ENTITY. Retry after 20–30 seconds.
+
+**`get_vm_metrics` returns error** — the VCD metrics CloudAPI endpoint (`/cloudapi/1.0.0/vms/{id}/metrics/current`) may not be enabled on all Zettagrid VCD instances. Contact Zettagrid support to confirm.
+
+**`list_external_networks` / `get_provider_network_info` return 4xx** — these are provider-scope endpoints. Tenant API tokens (the type issued via the customer portal) are expected to receive HTTP 4xx from these endpoints. This is correct VCD behavior, not a bug.
+
+**Auth token test:**
+```bash
+curl -s -X POST \
+  "https://mycloud-jkt.zettagrid.id/oauth/tenant/YourOrgName/token?grant_type=refresh_token&refresh_token=YourToken" \
+  -H "Accept: application/json" | jq .access_token
+```
+
+---
+
+## Testing
+
+This server uses live integration tests against real VCD infrastructure. Tests are not included in the public release — write your own against your VDC using the tool reference above. All tools follow the same request/response pattern; see `.env.example` for the environment variables.
+
+---
+
+## Fork Changes from Upstream
+
+### Indonesia zones (new)
+
+| Zone | Code | Endpoint |
+|------|------|----------|
+| Jakarta | `jkt` | `https://mycloud-jkt.zettagrid.id/api` |
+| Cibitung | `cbt` | `https://mycloud-cbt.zettagrid.id/api` (zone code assumed — confirm with Zettagrid Indonesia) |
+
+### Stubs fixed
+
+Three upstream tools had `// TODO` client implementations returning empty arrays. This fork wires them to existing XML parsers:
+
+| Tool | Fix |
+|------|-----|
+| `list_organizations` | Uses `parseOrganizationRecords()` |
+| `list_vapps` | Uses `parseVAppRecords()` |
+| `list_external_networks` | Uses `parseQueryResults()` |
+
+Additionally: `parseVAppRecords` had a `parseInt("POWERED_ON") = NaN` bug (VCD query API returns string status for vApps, not integer). Fixed with `isNaN` fallback, matching the existing `parseVMRecords` pattern.
+
+### New tools (30 added, 50 total vs upstream 20)
+
+**v1.1.0** (+30): `get_vm`, `shutdown_vm`, `reboot_vm`, `suspend_vm`, `reset_vm`, `get_vapp`, `power_on_vapp`, `power_off_vapp`, `create_vapp`, `delete_vapp`, `undeploy_vapp`, `update_vm_cpu`, `update_vm_memory`, `list_disks`, `list_tasks`, `get_task`, `list_org_networks`, `list_catalogs`, `list_catalog_items`, `list_snapshots`, `create_snapshot`, `revert_snapshot`, `remove_snapshots`, `get_zone_health`, `list_nat_rules`, `create_nat_rule`, `delete_nat_rule`, `update_firewall_rule`, `delete_firewall_rule`, `get_vm_metrics`
+
+### SDK upgrade
+
+Upgraded `@modelcontextprotocol/sdk` from `0.5.0` to `1.12.0`. The existing `Server` + `setRequestHandler` API is preserved; no tool registration code changed.
+
+### HTTP transport
+
+Added `StreamableHTTPServerTransport` alongside the original stdio transport. Controlled by `TRANSPORT` env var (`stdio` or `http`).
+
+---
+
+## VCD API Notes
+
+Relevant to anyone extending this server against VCD 10.5 / NSX-T:
+
+- **CloudAPI auth header**: `Accept: application/json;version=39.1` — NOT bare `application/json` (returns 406)
+- **XML API auth header**: `Accept: application/*+xml;version=39.1`
+- **Edge gateway URN format**: `urn:vcloud:gateway:{uuid}` — CloudAPI requires the full URN, not just the UUID
+- **NSX-T realization delay**: After any FW or NAT write, wait ~20s before issuing another edge gateway API call or VCD returns `BUSY_ENTITY`
+- **`update_firewall_rule` requires `id` in body**: VCD 10.5 silently ignores PUT updates that omit the `id` field (returns 202 accepted but applies nothing)
+- **NAT rule field names** (VCD 10.5 NSX-T CloudAPI schema): use `ruleType` (not `type`), `dnatExternalPort` (not `externalPort`); there is no `internalPort` field
+- **VM hardware XML namespace**: `PUT /virtualHardwareSection/cpu` and `/memory` require `xmlns="http://www.vmware.com/vcloud/v1.5"` as the root element namespace; VCD rejects the RASD namespace as root with "Cannot find declaration of element 'Item'"
+- **vApp status**: VCD query API returns string `"POWERED_ON"` (not integer) for vApp records; integer status is used in the detail API. `parseVAppRecords` handles both.
+- **VM settle time**: After a vApp instantiation task completes, wait ~5–8s before issuing power operations or they may fail silently
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+This project is not officially supported by Zettagrid and is provided without warranty.

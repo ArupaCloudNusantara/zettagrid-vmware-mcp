@@ -38,7 +38,7 @@ export class ZoneManager {
    * Initialize all available zones from environment configuration
    */
   private initializeZones(): void {
-    const zoneNames: ZoneId[] = ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin'];
+    const zoneNames: ZoneId[] = ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'];
     
     for (const zoneName of zoneNames) {
       const zoneConfig = this.loadZoneConfig(zoneName);
@@ -86,14 +86,23 @@ export class ZoneManager {
       perth: 'per',
       brisbane: 'bri',
       adelaide: 'adl',
-      darwin: 'dar'
+      darwin: 'dar',
+      jakarta: 'jkt',
+      cibitung: 'cbt'   // NOTE: zone code assumed — confirm with Zettagrid Indonesia support
     };
 
+    // Indonesia zones use a different domain (.zettagrid.id) and URL separator (-) vs AU (.zettagrid.com, .)
+    const idZones: ZoneId[] = ['jakarta', 'cibitung'];
+
     const zoneCode = zoneCodeMap[zoneName];
-    
-    // Auto-generate endpoints using standard Zettagrid format
-    const apiEndpoint = `https://mycloud.${zoneCode}.zettagrid.com/api`;
-    const oauthEndpoint = `https://mycloud.${zoneCode}.zettagrid.com/oauth/tenant/${organizationName}/token`;
+
+    // Auto-generate endpoints using the correct format per region
+    const apiEndpoint = idZones.includes(zoneName)
+      ? `https://mycloud-${zoneCode}.zettagrid.id/api`
+      : `https://mycloud.${zoneCode}.zettagrid.com/api`;
+    const oauthEndpoint = idZones.includes(zoneName)
+      ? `https://mycloud-${zoneCode}.zettagrid.id/oauth/tenant/${organizationName}/token`
+      : `https://mycloud.${zoneCode}.zettagrid.com/oauth/tenant/${organizationName}/token`;
 
     return {
       name: zoneName,
@@ -240,7 +249,7 @@ export class ZoneManager {
     defaultZone: string;
   } {
     return {
-      totalZones: 6, // Total possible Zettagrid zones
+      totalZones: 8, // Total possible Zettagrid zones (6 AU + 2 ID)
       configuredZones: this.zones.size,
       availableZones: Array.from(this.zones.keys()),
       defaultZone: this.config.defaultZone
@@ -270,7 +279,9 @@ export class ZoneManager {
       perth: 'Perth (WA)',
       brisbane: 'Brisbane (QLD)',
       adelaide: 'Adelaide (SA)',
-      darwin: 'Darwin (NT)'
+      darwin: 'Darwin (NT)',
+      jakarta: 'Jakarta (ID)',
+      cibitung: 'Cibitung (ID)'
     };
     
     return zoneDisplayNames[zoneId] || zoneId.charAt(0).toUpperCase() + zoneId.slice(1);

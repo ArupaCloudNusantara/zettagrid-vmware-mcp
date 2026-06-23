@@ -15,7 +15,6 @@ import {
   VApp,
   Vm,
   VmConsoleTicket,
-  EdgeGateway,
   FirewallRule,
   VdcResourceSummary,
   EdgeNetworkConfig,
@@ -24,14 +23,20 @@ import {
   UplinkInfo,
   ExternalNetworkInfo,
   ProviderNetworkInfo,
-  QueryResultRecords,
   PaginationParams,
   ListResponse
 } from '../types.js';
-import { 
-  parseVdcRecords, 
+import {
+  parseVdcRecords,
   parseVMRecords,
-  normalizeIdFromHrefOrId
+  parseVAppRecords,
+  parseOrganizationRecords,
+  parseQueryResults,
+  parseEntityAttributes,
+  normalizeIdFromHrefOrId,
+  parseVmDetails,
+  parseVAppDetails,
+  parseTaskResponse
 } from '../utils/xml-parser.js';
 
 export class ZettagridClient {
@@ -129,6 +134,14 @@ export class ZettagridClient {
 
       // Parse response
       const responseData = await this.parseResponse<T>(response);
+
+      // Throw on HTTP errors — executeWithRetry returns 4xx without throwing
+      if (!response.ok) {
+        const errText = typeof responseData === 'string'
+          ? (responseData.match(/<Error\b[^>]*message="([^"]+)"/) || [])[1] || (responseData as string).slice(0, 300)
+          : JSON.stringify(responseData).slice(0, 300);
+        throw new Error(`API ${config.method} ${config.url} → HTTP ${response.status}: ${errText}`);
+      }
 
       return {
         status: response.status,
@@ -230,6 +243,49 @@ export class ZettagridClient {
     return response;
   }
 
+  /**
+   * Make authenticated request to VCD CloudAPI (/cloudapi/1.0.0/...).
+   * Uses same bearer token as legacy API but targets /cloudapi/1.0.0 path.
+   * Returns parsed JSON — no XML involved.
+   */
+  private async makeCloudApiRequest<T = any>(
+    method: 'GET' | 'POST' | 'PUT' | 'DELETE',
+    path: string,
+    zoneId?: string,
+    body?: any
+  ): Promise<T> {
+    const auth = this.getZoneAuth(zoneId);
+    const zoneConfig = this.zoneManager.getZoneConfig(zoneId);
+    await auth.initialize();
+    const authHeaders = await auth.getAuthenticatedHeaders();
+
+    // Strip /api suffix, prepend /cloudapi/1.0.0
+    const baseUrl = zoneConfig.apiEndpoint.replace(/\/api$/, '');
+    const url = `${baseUrl}/cloudapi/1.0.0${path}`;
+
+    const headers: Record<string, string> = {
+      ...authHeaders,
+      'Accept': `application/json;version=${zoneConfig.apiVersion}`,
+    };
+    if (body !== undefined) headers['Content-Type'] = 'application/json';
+
+    const requestInit: RequestInit = {
+      method,
+      headers,
+      signal: AbortSignal.timeout(30000),
+    };
+    if (body !== undefined) requestInit.body = JSON.stringify(body);
+
+    const response = await fetch(url, requestInit);
+    if (!response.ok) {
+      const errText = await response.text().catch(() => '');
+      throw new Error(`CloudAPI ${method} ${path} → HTTP ${response.status}: ${errText.slice(0, 300)}`);
+    }
+    const text = await response.text();
+    if (!text) return {} as T;
+    try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
+  }
+
   // === ORGANIZATION METHODS ===
 
   /**
@@ -237,13 +293,25 @@ export class ZettagridClient {
    */
   async listOrganizations(zoneId?: string): Promise<McpToolResponse<Organization[]>> {
     try {
-      await this.makeRequest<QueryResultRecords>({
+      const response = await this.makeRequest<string>({
         method: 'GET',
-        url: '/org'
+        url: '/query',
+        params: { type: 'organization' }
       }, zoneId);
 
-      // Parse organizations from XML response (simplified)
-      const organizations: Organization[] = []; // TODO: Parse XML response
+      const parsedOrgs = parseOrganizationRecords(response.data);
+      const organizations: Organization[] = parsedOrgs.map(parsed => {
+        const org: Organization = {
+          href: parsed.href,
+          id: parsed.id,
+          name: parsed.name,
+          type: parsed.type
+        };
+        if (parsed.fullName !== undefined) {
+          org.fullName = parsed.fullName;
+        }
+        return org;
+      });
       
       return this.formatMcpResponse(organizations, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -260,12 +328,13 @@ export class ZettagridClient {
    */
   async getOrganization(organizationId: string, zoneId?: string): Promise<McpToolResponse<Organization>> {
     try {
-      const response = await this.makeRequest<Organization>({
+      const response = await this.makeRequest<string>({
         method: 'GET',
         url: `/org/${organizationId}`
       }, zoneId);
 
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      const parsed = parseEntityAttributes(response.data, /<(\w+:)?Org\b[^>]*>/);
+      return this.formatMcpResponse(parsed as unknown as Organization, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({} as Organization, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'GET_ORGANIZATION_ERROR',
@@ -337,12 +406,13 @@ export class ZettagridClient {
    */
   async getVdc(vdcId: string, zoneId?: string): Promise<McpToolResponse<Vdc>> {
     try {
-      const response = await this.makeRequest<Vdc>({
+      const response = await this.makeRequest<string>({
         method: 'GET',
         url: `/vdc/${vdcId}`
       }, zoneId);
 
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      const parsed = parseEntityAttributes(response.data, /<(\w+:)?Vdc\b[^>]*>/);
+      return this.formatMcpResponse(parsed as unknown as Vdc, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({} as Vdc, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'GET_VDC_ERROR',
@@ -500,20 +570,35 @@ export class ZettagridClient {
         if (pagination.filter) params.filter = (params.filter ? `${params.filter};` : '') + pagination.filter;
       }
 
-      const response = await this.makeRequest<QueryResultRecords>({
+      const response = await this.makeRequest<string>({
         method: 'GET',
         url: '/query',
         params
       }, zoneId);
 
-      // TODO: Parse vApps from query response
-      const vApps: VApp[] = [];
+      const parsedVApps = parseVAppRecords(response.data);
+      const vApps: VApp[] = parsedVApps.map(parsed => {
+        const vapp: VApp = {
+          href: parsed.href,
+          id: parsed.id,
+          name: parsed.name,
+          type: parsed.type
+        };
+        if (parsed.status !== undefined) {
+          vapp.status = parsed.status;
+        }
+        if (parsed.deployed !== undefined) {
+          vapp.deployed = parsed.deployed;
+        }
+        return vapp;
+      });
+
       const listResponse: ListResponse<VApp> = {
         items: vApps,
-        total: response.data.total || 0,
+        total: vApps.length,
         page: pagination?.page || 1,
         pageSize: pagination?.pageSize || 25,
-        hasMore: (pagination?.page || 1) * (pagination?.pageSize || 25) < (response.data.total || 0)
+        hasMore: false
       };
 
       return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
@@ -531,12 +616,14 @@ export class ZettagridClient {
    */
   async getVApp(vAppId: string, zoneId?: string): Promise<McpToolResponse<VApp>> {
     try {
-      const response = await this.makeRequest<VApp>({
+      const response = await this.makeRequest<string>({
         method: 'GET',
         url: `/vApp/vapp-${vAppId}`
       }, zoneId);
 
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      // parseVAppDetails extracts root attributes + child VM summaries from <Children>
+      const parsed = parseVAppDetails(response.data);
+      return this.formatMcpResponse(parsed as unknown as VApp, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({} as VApp, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'GET_VAPP_ERROR',
@@ -551,12 +638,11 @@ export class ZettagridClient {
    */
   async powerOnVApp(vAppId: string, zoneId?: string): Promise<McpToolResponse<any>> {
     try {
-      const response = await this.makeRequest({
+      const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vapp-${vAppId}/action/powerOn`
+        url: `/vApp/vapp-${vAppId}/power/action/powerOn`
       }, zoneId);
-
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'POWER_ON_VAPP_ERROR',
@@ -571,16 +657,46 @@ export class ZettagridClient {
    */
   async powerOffVApp(vAppId: string, zoneId?: string): Promise<McpToolResponse<any>> {
     try {
-      const response = await this.makeRequest({
+      const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vapp-${vAppId}/action/powerOff`
+        url: `/vApp/vapp-${vAppId}/power/action/powerOff`
       }, zoneId);
-
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'POWER_OFF_VAPP_ERROR',
         message: error instanceof Error ? error.message : 'Failed to power off vApp',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Undeploy a vApp — removes VMs from ESXi hosts without deleting data.
+   * Required before DELETE when the vApp is still deployed (has suspended/mixed-state VMs).
+   * UndeployPowerAction=powerOff forcibly shuts down any running VMs first.
+   */
+  async undeployVApp(vappId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const payload = `<?xml version="1.0" encoding="UTF-8"?>
+<UndeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">
+  <UndeployPowerAction>powerOff</UndeployPowerAction>
+</UndeployVAppParams>`;
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vapp-${vappId}/action/undeploy`,
+        data: payload,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' }
+      }, zoneId);
+      const task = response.data ? parseTaskResponse(response.data) : { _status: 'accepted' };
+      return this.formatMcpResponse(
+        { ...task, vappId, message: 'vApp undeploy task queued.' },
+        zoneId || this.zoneManager.getConfig().defaultZone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'UNDEPLOY_VAPP_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to undeploy vApp',
         details: error
       });
     }
@@ -650,12 +766,14 @@ export class ZettagridClient {
    */
   async getVM(vmId: string, zoneId?: string): Promise<McpToolResponse<Vm>> {
     try {
-      const response = await this.makeRequest<Vm>({
+      const response = await this.makeRequest<string>({
         method: 'GET',
         url: `/vApp/vm-${vmId}`
       }, zoneId);
 
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      // parseVmDetails extracts root attributes + CPU/RAM/IP from child XML elements
+      const parsed = parseVmDetails(response.data);
+      return this.formatMcpResponse(parsed as unknown as Vm, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({} as Vm, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'GET_VM_ERROR',
@@ -670,12 +788,11 @@ export class ZettagridClient {
    */
   async powerOnVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
     try {
-      const response = await this.makeRequest({
+      const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/action/powerOn`
+        url: `/vApp/vm-${vmId}/power/action/powerOn`
       }, zoneId);
-
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'POWER_ON_VM_ERROR',
@@ -690,12 +807,11 @@ export class ZettagridClient {
    */
   async powerOffVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
     try {
-      const response = await this.makeRequest({
+      const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/action/powerOff`
+        url: `/vApp/vm-${vmId}/power/action/powerOff`
       }, zoneId);
-
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'POWER_OFF_VM_ERROR',
@@ -706,16 +822,80 @@ export class ZettagridClient {
   }
 
   /**
+   * Graceful guest OS shutdown (preferred over powerOff for running VMs)
+   */
+  async shutdownVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vm-${vmId}/power/action/shutdown`
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'SHUTDOWN_VM_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to shutdown VM',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Graceful guest OS reboot
+   */
+  async rebootVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vm-${vmId}/power/action/reboot`
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'REBOOT_VM_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to reboot VM',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Suspend VM (save state to disk)
+   */
+  async suspendVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vm-${vmId}/power/action/suspend`
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'SUSPEND_VM_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to suspend VM',
+        details: error
+      });
+    }
+  }
+
+
+  /**
    * Get VM console ticket
    */
   async getVMConsole(vmId: string, zoneId?: string): Promise<McpToolResponse<VmConsoleTicket>> {
     try {
-      const response = await this.makeRequest<VmConsoleTicket>({
+      const response = await this.makeRequest<string>({
         method: 'POST',
         url: `/vApp/vm-${vmId}/screen/action/acquireTicket`
       }, zoneId);
 
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      const parsed = parseEntityAttributes(response.data, /<(\w+:)?ScreenTicket\b[^>]*>/);
+      // The ticket URL lives in the element's text content, not in attributes
+      const contentMatch = response.data.match(/>([^<]+)<\/(\w+:)?ScreenTicket/);
+      if (contentMatch?.[1]) {
+        parsed.ticket = contentMatch[1].trim();
+      }
+      return this.formatMcpResponse(parsed as unknown as VmConsoleTicket, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({} as VmConsoleTicket, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'GET_VM_CONSOLE_ERROR',
@@ -741,7 +921,7 @@ export class ZettagridClient {
     <Source href="${templateId}" />
 </InstantiateVAppTemplateParams>`;
 
-      const response = await this.makeRequest({
+      const response = await this.makeRequest<string>({
         method: 'POST',
         url: `/vdc/${vdcId}/action/instantiateVAppTemplate`,
         data: createVAppPayload,
@@ -750,7 +930,19 @@ export class ZettagridClient {
         }
       }, zoneId);
 
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      // Response is the new VApp entity XML — extract key fields
+      const vappXml  = response.data;
+      const vappHref = (vappXml.match(/href="([^"]+\/vApp\/vapp-[^"]+)"/) || [])[1] || '';
+      const vmHref   = (vappXml.match(/href="([^"]+\/vApp\/vm-[^"]+)"/) || [])[1] || '';
+      const vappId   = vappHref.split('/vApp/vapp-')[1] || '';
+      const vmId     = vmHref.split('/vApp/vm-')[1] || '';
+      const resolvedName = (vappXml.match(/<(\w+:)?VApp\b[^>]*name="([^"]+)"/) || [])[2] || vappName;
+      const taskHref = (vappXml.match(/<Task\b[^>]*href="([^"]+)"/) || [])[1] || '';
+      const taskStatus = (vappXml.match(/<Task\b[^>]*status="([^"]+)"/) || [])[1] || '';
+      return this.formatMcpResponse(
+        { vappId, vmId, vappName: resolvedName, vappHref, vmHref, task: { href: taskHref, status: taskStatus } },
+        zoneId || this.zoneManager.getConfig().defaultZone
+      );
     } catch (error) {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'CREATE_VAPP_ERROR',
@@ -852,168 +1044,235 @@ export class ZettagridClient {
     }
   }
 
-  // === EDGE GATEWAY AND FIREWALL METHODS ===
+  // === EDGE GATEWAY AND FIREWALL METHODS (CloudAPI — NSX-T) ===
 
   /**
-   * List edge gateways
+   * List edge gateways via CloudAPI (required for NSX-T backed gateways).
+   * Legacy /api/query?type=edgeGateway only works for NSX-V.
    */
-  async listEdgeGateways(zoneId?: string, pagination?: PaginationParams): Promise<McpToolResponse<ListResponse<EdgeGateway>>> {
+  async listEdgeGateways(zoneId?: string, _pagination?: PaginationParams): Promise<McpToolResponse<ListResponse<any>>> {
     try {
-      const params: Record<string, string> = { type: 'edgeGateway' };
-      
-      if (pagination) {
-        if (pagination.page) params.page = pagination.page.toString();
-        if (pagination.pageSize) params.pageSize = pagination.pageSize.toString();
-        if (pagination.filter) params.filter = pagination.filter;
-      }
+      const data = await this.makeCloudApiRequest<any>('GET', '/edgeGateways', zoneId);
+      const items = data.values || (Array.isArray(data) ? data : []);
 
-      const response = await this.makeRequest<QueryResultRecords>({
-        method: 'GET',
-        url: '/query',
-        params
-      }, zoneId);
+      // Normalise: extract UUID from URN id (urn:vcloud:gateway:{uuid})
+      const normalised = items.map((gw: any) => {
+        const entry: Record<string, any> = {
+          id: gw.id?.replace(/^urn:vcloud:gateway:/, '') || gw.id,
+          urn: gw.id,
+          name: gw.name,
+          status: gw.status,
+          ownerVdc: gw.ownerRef?.name,
+        };
+        if (gw.description) entry.description = gw.description;
+        if (gw.gatewayBacking?.backingType) entry.backingType = gw.gatewayBacking.backingType;
+        if (gw.externalNetworkRef?.name) entry.externalNetwork = gw.externalNetworkRef.name;
+        if (gw.primaryIp) entry.primaryIp = gw.primaryIp;
+        const subnets = (gw.subnets?.values || []).map((s: any) => ({
+          gateway: s.gateway, prefixLength: s.prefixLength, primaryIp: s.primaryIp,
+          totalIpCount: s.totalIpCount, usedIpCount: s.usedIpCount,
+        }));
+        if (subnets.length > 0) entry.subnets = subnets;
+        return entry;
+      });
 
-      // TODO: Parse edge gateways from query response
-      const edgeGateways: EdgeGateway[] = [];
-      const listResponse: ListResponse<EdgeGateway> = {
-        items: edgeGateways,
-        total: response.data.total || 0,
-        page: pagination?.page || 1,
-        pageSize: pagination?.pageSize || 25,
-        hasMore: (pagination?.page || 1) * (pagination?.pageSize || 25) < (response.data.total || 0)
+      const listResponse: ListResponse<any> = {
+        items: normalised, total: normalised.length,
+        page: 1, pageSize: normalised.length, hasMore: false,
       };
-
       return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
-      return this.formatMcpResponse({} as ListResponse<EdgeGateway>, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({} as ListResponse<any>, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'LIST_EDGE_GATEWAYS_ERROR',
         message: error instanceof Error ? error.message : 'Failed to list edge gateways',
-        details: error
+        details: error,
       });
     }
   }
 
   /**
-   * Get edge gateway details
+   * Get edge gateway details via CloudAPI.
    */
-  async getEdgeGateway(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<EdgeGateway>> {
+  async getEdgeGateway(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<any>> {
     try {
-      const response = await this.makeRequest<EdgeGateway>({
-        method: 'GET',
-        url: `/admin/edgeGateway/${edgeGatewayId}`
-      }, zoneId);
-
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      const gwUrn = toGatewayUrn(edgeGatewayId);
+      const data = await this.makeCloudApiRequest<any>('GET', `/edgeGateways/${gwUrn}`, zoneId);
+      // Normalise similar to list
+      const result = {
+        id: data.id?.replace(/^urn:vcloud:gateway:/, '') || data.id,
+        urn: data.id,
+        name: data.name,
+        description: data.description,
+        status: data.status,
+        backingType: data.gatewayBacking?.backingType,
+        ownerVdc: data.ownerRef?.name,
+        externalNetwork: data.externalNetworkRef?.name,
+        primaryIp: data.primaryIp,
+        subnets: (data.subnets?.values || []).map((s: any) => ({
+          gateway: s.gateway,
+          prefixLength: s.prefixLength,
+          primaryIp: s.primaryIp,
+          ipRanges: s.ipRanges?.values || [],
+          totalIpCount: s.totalIpCount,
+          usedIpCount: s.usedIpCount,
+        })),
+        orgVdcNetworkCount: data.orgVdcNetworkCount,
+        _raw: data,
+      };
+      return this.formatMcpResponse(result, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
-      return this.formatMcpResponse({} as EdgeGateway, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({} as any, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'GET_EDGE_GATEWAY_ERROR',
         message: error instanceof Error ? error.message : 'Failed to get edge gateway',
-        details: error
+        details: error,
       });
     }
   }
 
   /**
-   * List firewall rules for an edge gateway
+   * List firewall rules for an edge gateway via CloudAPI (NSX-T).
    */
-  async listFirewallRules(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<ListResponse<FirewallRule>>> {
+  async listFirewallRules(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<ListResponse<any>>> {
     try {
-      const response = await this.makeRequest<EdgeGateway>({
-        method: 'GET',
-        url: `/admin/edgeGateway/${edgeGatewayId}`
-      }, zoneId);
+      const gwUrn = toGatewayUrn(edgeGatewayId);
+      // Try /firewall/rules first, fall back to /firewall
+      let data: any;
+      try {
+        data = await this.makeCloudApiRequest<any>('GET', `/edgeGateways/${gwUrn}/firewall/rules`, zoneId);
+      } catch {
+        data = await this.makeCloudApiRequest<any>('GET', `/edgeGateways/${gwUrn}/firewall`, zoneId);
+      }
 
-      // Extract firewall rules from edge gateway configuration
-      const firewallRules = response.data.configuration?.edgeGatewayServiceConfiguration?.firewallService?.firewallRule || [];
-      
-      const listResponse: ListResponse<FirewallRule> = {
-        items: firewallRules,
-        total: firewallRules.length,
-        page: 1,
-        pageSize: firewallRules.length,
-        hasMore: false
+      // Response may be {userDefinedRules: [...], defaultRules: [...]} or {values: [...]} or []
+      let userRules: any[] = [];
+      let defaultRules: any[] = [];
+      if (Array.isArray(data)) {
+        userRules = data;
+      } else if (data.values) {
+        userRules = data.values;
+      } else {
+        userRules = data.userDefinedRules || [];
+        defaultRules = data.defaultRules || [];
+      }
+
+      const allRules = [...userRules, ...defaultRules.map((r: any) => ({ ...r, _isDefault: true }))];
+
+      const listResponse: ListResponse<any> = {
+        items: allRules, total: allRules.length,
+        page: 1, pageSize: allRules.length, hasMore: false,
       };
-
       return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
-      return this.formatMcpResponse({} as ListResponse<FirewallRule>, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({} as ListResponse<any>, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'LIST_FIREWALL_RULES_ERROR',
         message: error instanceof Error ? error.message : 'Failed to list firewall rules',
-        details: error
+        details: error,
       });
     }
   }
 
   /**
-   * Create a firewall rule
+   * Create a firewall rule via CloudAPI (NSX-T).
    */
   async createFirewallRule(
-    edgeGatewayId: string, 
-    firewallRule: Partial<FirewallRule>, 
+    edgeGatewayId: string,
+    firewallRule: Partial<FirewallRule>,
     zoneId?: string
   ): Promise<McpToolResponse<any>> {
     try {
-      // Create firewall rule XML payload
-      const firewallRuleXml = `<?xml version="1.0" encoding="UTF-8"?>
-<FirewallRule xmlns="http://www.vmware.com/vcloud/v1.5">
-    <IsEnabled>${firewallRule.isEnabled || true}</IsEnabled>
-    <Description>${firewallRule.description || ''}</Description>
-    <Policy>${firewallRule.policy || 'allow'}</Policy>
-    <Protocols>
-        <Tcp>${firewallRule.protocols?.tcp || false}</Tcp>
-        <Udp>${firewallRule.protocols?.udp || false}</Udp>
-        <Icmp>${firewallRule.protocols?.icmp || false}</Icmp>
-    </Protocols>
-    <DestinationPortRange>${firewallRule.destinationPortRange || 'Any'}</DestinationPortRange>
-    <DestinationIp>${firewallRule.destinationIp || 'Any'}</DestinationIp>
-    <SourcePortRange>${firewallRule.sourcePortRange || 'Any'}</SourcePortRange>
-    <SourceIp>${firewallRule.sourceIp || 'Any'}</SourceIp>
-    <EnableLogging>${firewallRule.enableLogging || false}</EnableLogging>
-</FirewallRule>`;
+      edgeGatewayId = toGatewayUrn(edgeGatewayId);
+      const portProfiles = (firewallRule as any).portProfiles as string[] | undefined;
+      const payload: Record<string, any> = {
+        name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
+        enabled: firewallRule.isEnabled !== false,
+        action: firewallRule.policy === 'allow' ? 'ALLOW' : 'DROP',
+        ipProtocol: 'IPV4_IPV6',
+        direction: 'IN_OUT',
+        sourceFirewallGroups: [],
+        destinationFirewallGroups: [],
+        applicationPortProfiles: portProfiles?.length
+          ? portProfiles.map(p => ({ id: p, displayName: p.split(':').pop() || p }))
+          : [],
+        description: firewallRule.description || '',
+        logging: firewallRule.enableLogging || false,
+      };
+      // VCD CloudAPI uses sourceFirewallIpAddresses / destinationFirewallIpAddresses (array of strings)
+      if (firewallRule.sourceIp && firewallRule.sourceIp !== 'Any') {
+        payload.sourceFirewallIpAddresses = [firewallRule.sourceIp];
+      }
+      if (firewallRule.destinationIp && firewallRule.destinationIp !== 'Any') {
+        payload.destinationFirewallIpAddresses = [firewallRule.destinationIp];
+      }
 
-      const response = await this.makeRequest({
-        method: 'POST',
-        url: `/admin/edgeGateway/${edgeGatewayId}/action/configureServices`,
-        data: firewallRuleXml,
-        headers: {
-          'Content-Type': 'application/vnd.vmware.vcloud.firewallRule+xml'
-        }
-      }, zoneId);
-
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      const data = await this.makeCloudApiRequest<any>(
+        'POST', `/edgeGateways/${edgeGatewayId}/firewall/rules`, zoneId, payload
+      );
+      // CloudAPI returns 202 with empty body — rule creation is async
+      const result = (data && Object.keys(data).length > 0) ? data : {
+        _status: 'accepted',
+        ruleName: payload.name,
+        message: 'Firewall rule creation accepted (202). Use list_firewall_rules to confirm the rule and retrieve its ID.',
+      };
+      return this.formatMcpResponse(result, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'CREATE_FIREWALL_RULE_ERROR',
         message: error instanceof Error ? error.message : 'Failed to create firewall rule',
-        details: error
+        details: error,
       });
     }
   }
 
-  // === NETWORK CONFIGURATION METHODS ===
-
   /**
-   * Show comprehensive edge gateway network configuration
+   * Show comprehensive edge gateway network configuration via CloudAPI.
    */
   async showEdgeNetworkConfig(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<EdgeNetworkConfig>> {
     try {
-      // Get edge gateway details with network configuration
-      const edgeResponse = await this.makeRequest<EdgeGateway>({
-        method: 'GET',
-        url: `/admin/edgeGateway/${edgeGatewayId}`
-      }, zoneId);
+      const gw = await this.makeCloudApiRequest<any>('GET', `/edgeGateways/${toGatewayUrn(edgeGatewayId)}`, zoneId);
 
-      const edgeGateway = edgeResponse.data;
-      
-      // Extract network configuration information
+      const subnets = gw.subnets?.values || [];
+
+      const externalIPs: ExternalIPInfo[] = subnets.map((s: any) => ({
+        ipAddress: s.primaryIp || s.gateway,
+        isAllocated: true,
+        isPrimary: s.primaryIp === gw.primaryIp,
+        networkName: gw.externalNetworkRef?.name,
+        usage: `/${s.prefixLength}`,
+      })).filter((e: ExternalIPInfo) => e.ipAddress);
+
+      const uplinks: UplinkInfo[] = subnets.map((s: any) => ({
+        name: gw.externalNetworkRef?.name || 'External',
+        interfaceType: gw.gatewayBacking?.backingType || 'NSX_T',
+        isConnected: gw.status === 'REALIZED',
+        subnets: [{
+          gateway: s.gateway,
+          netmask: prefixToNetmask(s.prefixLength),
+          primaryIp: s.primaryIp,
+          ipRanges: (s.ipRanges?.values || []).map((r: any) => ({
+            startAddress: r.startAddress,
+            endAddress: r.endAddress,
+          })),
+        }],
+        externalNetwork: gw.externalNetworkRef?.name,
+      }));
+
+      const gatewayInterfaces: EdgeGatewayInterfaceInfo[] = [{
+        name: gw.externalNetworkRef?.name || 'External Uplink',
+        interfaceType: 'external',
+        networkName: gw.externalNetworkRef?.name,
+        ipAddresses: subnets.map((s: any) => s.primaryIp).filter(Boolean),
+        isConnected: gw.status === 'REALIZED',
+        useForDefaultRoute: true,
+      }];
+
       const config: EdgeNetworkConfig = {
-        edgeGatewayId: edgeGatewayId,
-        edgeGatewayName: edgeGateway.name || 'Unknown Edge Gateway',
-        externalIPs: this.extractExternalIPs(edgeGateway),
-        gatewayInterfaces: this.extractGatewayInterfaces(edgeGateway),
-        uplinks: this.extractUplinks(edgeGateway),
-        externalNetworks: await this.getExternalNetworks(zoneId),
-        providerNetworks: await this.getProviderNetworks(zoneId)
+        edgeGatewayId,
+        edgeGatewayName: gw.name || 'Unknown',
+        externalIPs,
+        gatewayInterfaces,
+        uplinks,
+        externalNetworks: [],
+        providerNetworks: [],
       };
 
       return this.formatMcpResponse(config, zoneId || this.zoneManager.getConfig().defaultZone);
@@ -1021,226 +1280,397 @@ export class ZettagridClient {
       return this.formatMcpResponse({} as EdgeNetworkConfig, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'SHOW_EDGE_NETWORK_CONFIG_ERROR',
         message: error instanceof Error ? error.message : 'Failed to get edge network configuration',
-        details: error
+        details: error,
       });
     }
   }
 
   /**
-   * List external networks
+   * List NAT rules for an edge gateway via CloudAPI.
+   */
+  async listNatRules(edgeGatewayId: string, zoneId?: string): Promise<McpToolResponse<ListResponse<any>>> {
+    try {
+      const gwUrn = toGatewayUrn(edgeGatewayId);
+      const data = await this.makeCloudApiRequest<any>('GET', `/edgeGateways/${gwUrn}/nat/rules`, zoneId);
+
+      let items: any[] = [];
+      if (Array.isArray(data)) {
+        items = data;
+      } else if (data.values) {
+        items = data.values;
+      } else if (data.userDefinedRules) {
+        items = data.userDefinedRules;
+      } else if (data.natRules) {
+        items = data.natRules;
+      }
+
+      const listResponse: ListResponse<any> = {
+        items, total: items.length, page: 1, pageSize: items.length, hasMore: false,
+      };
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<any>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_NAT_RULES_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list NAT rules',
+        details: error,
+      });
+    }
+  }
+
+  /**
+   * List external networks (requires provider scope — returns empty for tenant users).
    */
   async listExternalNetworks(zoneId?: string): Promise<McpToolResponse<ListResponse<ExternalNetworkInfo>>> {
     try {
-      const networks = await this.getExternalNetworks(zoneId);
-      
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: '/query',
+        params: { type: 'externalNetwork' }
+      }, zoneId);
+      const records = parseQueryResults(response.data);
+      const items = records.map(r => ({
+        id: r.id || '',
+        name: r.name || '',
+        description: r.description,
+        gateway: r.gateway,
+        netmask: r.netmask,
+        ipRanges: [],
+      } as ExternalNetworkInfo));
       const listResponse: ListResponse<ExternalNetworkInfo> = {
-        items: networks,
-        total: networks.length,
-        page: 1,
-        pageSize: networks.length,
-        hasMore: false
+        items, total: items.length, page: 1, pageSize: items.length, hasMore: false,
       };
-
       return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({} as ListResponse<ExternalNetworkInfo>, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'LIST_EXTERNAL_NETWORKS_ERROR',
-        message: error instanceof Error ? error.message : 'Failed to list external networks',
+        message: error instanceof Error ? error.message : 'Failed to list external networks (requires provider scope)',
+        details: error,
+      });
+    }
+  }
+
+  /**
+   * Get provider network info (requires provider scope — returns empty for tenant users).
+   */
+  async getProviderNetworkInfo(zoneId?: string): Promise<McpToolResponse<ListResponse<ProviderNetworkInfo>>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: '/query',
+        params: { type: 'providerVdcStorageProfile' }
+      }, zoneId);
+      const records = parseQueryResults(response.data);
+      const items = records.map(r => ({
+        id: r.id || '',
+        name: r.name || '',
+        networkType: 'VLAN' as const,
+        isAvailable: true,
+        isShared: false,
+      } as ProviderNetworkInfo));
+      const listResponse: ListResponse<ProviderNetworkInfo> = {
+        items, total: items.length, page: 1, pageSize: items.length, hasMore: false,
+      };
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<ProviderNetworkInfo>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'GET_PROVIDER_NETWORK_INFO_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to get provider network info (requires provider scope)',
+        details: error,
+      });
+    }
+  }
+
+  /**
+   * Get current VM metrics via CloudAPI (CPU%, RAM%, IOPS, network throughput).
+   * vmId should be the VM's UUID (will be formatted as URN internally).
+   */
+  async getVmMetrics(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    // CloudAPI uses URN format for VM IDs
+    const vmUrn = vmId.startsWith('urn:') ? vmId : `urn:vcloud:vm:${vmId}`;
+    try {
+      const data = await this.makeCloudApiRequest<any>('GET', `/vms/${vmUrn}/metrics/current`, zoneId);
+
+      // Parse metrics array into a readable object
+      const raw: any[] = data.metrics || data.metricSeries || [];
+      const metrics: Record<string, any> = {};
+      for (const m of raw) {
+        const key = m.name || m.metric;
+        const val = m.value !== undefined ? m.value : (m.readings?.[0]?.value);
+        if (key && val !== undefined) {
+          metrics[key] = { value: parseFloat(val) || val, unit: m.unit };
+        }
+      }
+
+      const summary = {
+        vmId,
+        vmUrn,
+        timestamp: new Date().toISOString(),
+        cpu: {
+          usagePercent: metrics['cpu.usage.average']?.value,
+          usageMhz: metrics['cpu.usagemhz.average']?.value,
+        },
+        memory: {
+          usagePercent: metrics['mem.usage.average']?.value,
+          consumedKB: metrics['mem.consumed.average']?.value,
+          activeKB: metrics['mem.active.average']?.value,
+        },
+        disk: {
+          throughputBps: metrics['disk.throughput.average']?.value,
+          readThroughputBps: metrics['disk.read.average']?.value,
+          writeThroughputBps: metrics['disk.write.average']?.value,
+          iopsRead: metrics['disk.numberReadAveraged.average']?.value,
+          iopsWrite: metrics['disk.numberWriteAveraged.average']?.value,
+        },
+        network: {
+          throughputKBps: metrics['net.throughput.average']?.value,
+          receivedKBps: metrics['net.received.average']?.value,
+          transmittedKBps: metrics['net.transmitted.average']?.value,
+        },
+        allMetrics: metrics,
+        _raw: data,
+      };
+
+      return this.formatMcpResponse(summary, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'GET_VM_METRICS_ERROR',
+        message: error instanceof Error ? error.message : 'VM metrics not available — the /cloudapi/1.0.0/vms/{id}/metrics/current endpoint is not exposed on this Zettagrid Jakarta VCD instance',
+        details: error,
+      });
+    }
+  }
+
+  // === QUERY-BASED LIST METHODS (fork addition) ===
+
+  /**
+   * List independent (named) disks
+   */
+  async listDisks(zoneId?: string): Promise<McpToolResponse<ListResponse<Record<string, any>>>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: '/query',
+        params: { type: 'disk' }
+      }, zoneId);
+      const records = parseQueryResults(response.data);
+      const listResponse: ListResponse<Record<string, any>> = {
+        items: records, total: records.length, page: 1, pageSize: records.length, hasMore: false
+      };
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<Record<string, any>>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_DISKS_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list disks',
         details: error
       });
     }
   }
 
   /**
-   * Get provider network information
+   * List recent tasks (useful for polling async operation status)
    */
-  async getProviderNetworkInfo(zoneId?: string): Promise<McpToolResponse<ListResponse<ProviderNetworkInfo>>> {
+  async listTasks(zoneId?: string): Promise<McpToolResponse<ListResponse<Record<string, any>>>> {
     try {
-      const networks = await this.getProviderNetworks(zoneId);
-      
-      const listResponse: ListResponse<ProviderNetworkInfo> = {
-        items: networks,
-        total: networks.length,
-        page: 1,
-        pageSize: networks.length,
-        hasMore: false
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: '/query',
+        params: { type: 'task', sortDesc: 'startDate' }
+      }, zoneId);
+      const records = parseQueryResults(response.data);
+      const listResponse: ListResponse<Record<string, any>> = {
+        items: records, total: records.length, page: 1, pageSize: records.length, hasMore: false
       };
-
       return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
-      return this.formatMcpResponse({} as ListResponse<ProviderNetworkInfo>, zoneId || this.zoneManager.getConfig().defaultZone, {
-        code: 'GET_PROVIDER_NETWORK_INFO_ERROR',
-        message: error instanceof Error ? error.message : 'Failed to get provider network information',
+      return this.formatMcpResponse({} as ListResponse<Record<string, any>>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_TASKS_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list tasks',
         details: error
       });
     }
   }
 
-  // === PRIVATE HELPER METHODS FOR NETWORK EXTRACTION ===
-
-  private extractExternalIPs(edgeGateway: EdgeGateway): ExternalIPInfo[] {
-    const externalIPs: ExternalIPInfo[] = [];
-    
+  /**
+   * List organization VDC networks
+   */
+  async listOrgNetworks(zoneId?: string): Promise<McpToolResponse<ListResponse<Record<string, any>>>> {
     try {
-      // Extract IPs from gateway interfaces
-      const interfaces = edgeGateway.configuration?.gatewayInterfaces?.gatewayInterface || [];
-      
-      interfaces.forEach(intf => {
-        if (intf.interfaceType === 'external' && intf.subnetParticipation) {
-          intf.subnetParticipation.forEach(subnet => {
-            if (subnet.gateway) {
-              const externalIP: ExternalIPInfo = {
-                ipAddress: subnet.gateway,
-                isAllocated: true,
-                isPrimary: true,
-                usage: 'Gateway IP'
-              };
-              if (intf.name) externalIP.interfaceName = intf.name;
-              if (intf.network?.name) externalIP.networkName = intf.network.name;
-              externalIPs.push(externalIP);
-            }
-          });
-        }
-      });
-    } catch (error) {
-      console.warn('Failed to extract external IPs:', error);
-    }
-    
-    return externalIPs;
-  }
-
-  private extractGatewayInterfaces(edgeGateway: EdgeGateway): EdgeGatewayInterfaceInfo[] {
-    const interfaces: EdgeGatewayInterfaceInfo[] = [];
-    
-    try {
-      const gatewayInterfaces = edgeGateway.configuration?.gatewayInterfaces?.gatewayInterface || [];
-      
-      gatewayInterfaces.forEach(intf => {
-        const interfaceInfo: EdgeGatewayInterfaceInfo = {
-          name: intf.name || 'Unknown',
-          interfaceType: intf.interfaceType || 'internal',
-          ipAddresses: [],
-          isConnected: !!intf.network
-        };
-
-        // Add optional properties only if they exist
-        if (intf.displayName) interfaceInfo.displayName = intf.displayName;
-        if (intf.network?.name) interfaceInfo.networkName = intf.network.name;
-        if (intf.network?.href) interfaceInfo.networkHref = intf.network.href;
-        if (intf.useForDefaultRoute !== undefined) interfaceInfo.useForDefaultRoute = intf.useForDefaultRoute;
-
-        // Extract IP addresses from subnet participation
-        if (intf.subnetParticipation) {
-          intf.subnetParticipation.forEach(subnet => {
-            if (subnet.gateway) {
-              interfaceInfo.ipAddresses.push(subnet.gateway);
-              interfaceInfo.gateway = subnet.gateway;
-            }
-          });
-        }
-
-        // Extract rate limits
-        if (intf.inRateLimit || intf.outRateLimit) {
-          interfaceInfo.rateLimit = {};
-          if (intf.inRateLimit) interfaceInfo.rateLimit.inbound = intf.inRateLimit;
-          if (intf.outRateLimit) interfaceInfo.rateLimit.outbound = intf.outRateLimit;
-        }
-
-        interfaces.push(interfaceInfo);
-      });
-    } catch (error) {
-      console.warn('Failed to extract gateway interfaces:', error);
-    }
-    
-    return interfaces;
-  }
-
-  private extractUplinks(edgeGateway: EdgeGateway): UplinkInfo[] {
-    const uplinks: UplinkInfo[] = [];
-    
-    try {
-      const interfaces = edgeGateway.configuration?.gatewayInterfaces?.gatewayInterface || [];
-      
-      interfaces.forEach(intf => {
-        if (intf.interfaceType === 'external') {
-          const uplink: UplinkInfo = {
-            name: intf.name || 'Unknown',
-            interfaceType: intf.interfaceType,
-            isConnected: !!intf.network,
-            subnets: []
-          };
-
-          // Add optional properties only if they exist
-          if (intf.network?.name) uplink.externalNetwork = intf.network.name;
-
-          // Extract subnet information
-          if (intf.subnetParticipation) {
-            intf.subnetParticipation.forEach(subnet => {
-              if (subnet.gateway) {
-                uplink.subnets.push({
-                  gateway: subnet.gateway,
-                  netmask: '255.255.255.0', // Default, should be extracted from actual data
-                  ipRanges: [],
-                  primaryIp: subnet.gateway
-                });
-              }
-            });
-          }
-
-          uplinks.push(uplink);
-        }
-      });
-    } catch (error) {
-      console.warn('Failed to extract uplinks:', error);
-    }
-    
-    return uplinks;
-  }
-
-  private async getExternalNetworks(zoneId?: string): Promise<ExternalNetworkInfo[]> {
-    const networks: ExternalNetworkInfo[] = [];
-    
-    try {
-      // Query for external networks
-      await this.makeRequest<QueryResultRecords>({
+      const response = await this.makeRequest<string>({
         method: 'GET',
         url: '/query',
-        params: {
-          type: 'externalNetwork'
-        }
+        params: { type: 'orgVdcNetwork' }
       }, zoneId);
-
-      // Parse external networks (placeholder implementation)
-      // This would need proper XML parsing based on actual response format
-      
+      const records = parseQueryResults(response.data);
+      const listResponse: ListResponse<Record<string, any>> = {
+        items: records, total: records.length, page: 1, pageSize: records.length, hasMore: false
+      };
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
-      console.warn('Failed to get external networks:', error);
+      return this.formatMcpResponse({} as ListResponse<Record<string, any>>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_ORG_NETWORKS_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list org networks',
+        details: error
+      });
     }
-    
-    return networks;
   }
 
-  private async getProviderNetworks(zoneId?: string): Promise<ProviderNetworkInfo[]> {
-    const networks: ProviderNetworkInfo[] = [];
-    
+  /**
+   * List catalogs
+   */
+  async listCatalogs(zoneId?: string): Promise<McpToolResponse<ListResponse<Record<string, any>>>> {
     try {
-      // Query for provider networks 
-      await this.makeRequest<QueryResultRecords>({
+      const response = await this.makeRequest<string>({
         method: 'GET',
         url: '/query',
-        params: {
-          type: 'providerVdcNetwork'
-        }
+        params: { type: 'catalog' }
+      }, zoneId);
+      const records = parseQueryResults(response.data);
+      const listResponse: ListResponse<Record<string, any>> = {
+        items: records, total: records.length, page: 1, pageSize: records.length, hasMore: false
+      };
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<Record<string, any>>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_CATALOGS_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list catalogs',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * List catalog items (templates) within a catalog — needed to discover template IDs for create_vapp
+   */
+  async listCatalogItems(catalogId?: string, zoneId?: string): Promise<McpToolResponse<ListResponse<Record<string, any>>>> {
+    try {
+      const params: Record<string, string> = { type: 'catalogItem' };
+      if (catalogId) params.filter = `catalog==${catalogId}`;
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: '/query',
+        params
+      }, zoneId);
+      const records = parseQueryResults(response.data);
+      const listResponse: ListResponse<Record<string, any>> = {
+        items: records, total: records.length, page: 1, pageSize: records.length, hasMore: false
+      };
+      return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<Record<string, any>>, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_CATALOG_ITEMS_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list catalog items',
+        details: error
+      });
+    }
+  }
+
+  // === SNAPSHOT METHODS (fork addition, legacy API) ===
+
+  /**
+   * List VM snapshots
+   */
+  async listSnapshots(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vApp/vm-${vmId}/snapshotSection`
       }, zoneId);
 
-      // Parse provider networks (placeholder implementation)
-      // This would need proper XML parsing based on actual response format
-      
+      const xmlData = response.data;
+      const sectionInfo = parseEntityAttributes(xmlData, /<(\w+:)?SnapshotSection\b[^>]*>/);
+
+      // Parse any child <Snapshot> elements (self-closing or open tags)
+      const snapshots: Record<string, any>[] = [];
+      const snapPattern = /<(\w+:)?Snapshot\b[^>]*>/g;
+      let snapMatch;
+      while ((snapMatch = snapPattern.exec(xmlData)) !== null) {
+        snapshots.push(parseEntityAttributes(snapMatch[0], /<[^>]+>/));
+      }
+
+      return this.formatMcpResponse({ sectionInfo, snapshots }, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
-      console.warn('Failed to get provider networks:', error);
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'LIST_SNAPSHOTS_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list snapshots',
+        details: error
+      });
     }
-    
-    return networks;
+  }
+
+  /**
+   * Create a VM snapshot
+   */
+  async createSnapshot(vmId: string, snapshotName?: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const payload = `<?xml version="1.0" encoding="UTF-8"?>
+<CreateSnapshotParams xmlns="http://www.vmware.com/vcloud/v1.5" name="${snapshotName || 'snapshot'}" memory="false" quiesce="false" />`;
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vm-${vmId}/action/createSnapshot`,
+        data: payload,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.createSnapshotParams+xml' }
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'CREATE_SNAPSHOT_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to create snapshot',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Revert VM to current snapshot
+   */
+  async revertSnapshot(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vm-${vmId}/snapshot/action/revertToCurrentSnapshot`
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'REVERT_SNAPSHOT_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to revert snapshot',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Remove all snapshots for a VM
+   */
+  async removeAllSnapshots(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vm-${vmId}/snapshot/action/removeAllSnapshots`
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : '';
+      // 404 means no snapshot section exists → treat as no-op success
+      if (msg.includes('HTTP 404')) {
+        return this.formatMcpResponse(
+          { _status: 'no_snapshots', message: 'No snapshots found — nothing to remove.' },
+          zoneId || this.zoneManager.getConfig().defaultZone
+        );
+      }
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'REMOVE_SNAPSHOTS_ERROR',
+        message: msg || 'Failed to remove snapshots',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Get health status across all zones (fork addition: exposed as MCP tool get_zone_health)
+   */
+  async getZoneHealth(): Promise<McpToolResponse<any>> {
+    return this.getHealthStatus();
   }
 
   /**
@@ -1268,4 +1698,356 @@ export class ZettagridClient {
       });
     }
   }
+
+  // === P1 NEW TOOLS ===
+
+  /**
+   * Update an existing firewall rule by ID.
+   * Accepts the same fields as createFirewallRule plus the ruleId to update.
+   */
+  async updateFirewallRule(
+    edgeGatewayId: string,
+    ruleId: string,
+    firewallRule: Partial<FirewallRule>,
+    zoneId?: string
+  ): Promise<McpToolResponse<any>> {
+    try {
+      const gwUrn = toGatewayUrn(edgeGatewayId);
+      const portProfiles = (firewallRule as any).portProfiles as string[] | undefined;
+      const payload: Record<string, any> = {
+        id: ruleId,
+        name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
+        enabled: firewallRule.isEnabled !== false,
+        action: firewallRule.policy === 'allow' ? 'ALLOW' : ((firewallRule.policy as string) === 'reject' ? 'REJECT' : 'DROP'),
+        ipProtocol: 'IPV4_IPV6',
+        direction: 'IN_OUT',
+        sourceFirewallGroups: [],
+        destinationFirewallGroups: [],
+        applicationPortProfiles: portProfiles?.length
+          ? portProfiles.map(p => ({ id: p, displayName: p.split(':').pop() || p }))
+          : [],
+        description: firewallRule.description || '',
+        logging: firewallRule.enableLogging || false,
+      };
+      if (firewallRule.sourceIp && firewallRule.sourceIp !== 'Any') {
+        payload.sourceFirewallIpAddresses = [firewallRule.sourceIp];
+      }
+      if (firewallRule.destinationIp && firewallRule.destinationIp !== 'Any') {
+        payload.destinationFirewallIpAddresses = [firewallRule.destinationIp];
+      }
+      const data = await this.makeCloudApiRequest<any>(
+        'PUT', `/edgeGateways/${gwUrn}/firewall/rules/${ruleId}`, zoneId, payload
+      );
+      const result = (data && Object.keys(data).length > 0) ? data : {
+        _status: 'accepted',
+        ruleId,
+        message: 'Firewall rule update accepted. Use list_firewall_rules to confirm.',
+      };
+      return this.formatMcpResponse(result, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'UPDATE_FIREWALL_RULE_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to update firewall rule',
+        details: error,
+      });
+    }
+  }
+
+  /**
+   * Delete a firewall rule by ID.
+   */
+  async deleteFirewallRule(
+    edgeGatewayId: string,
+    ruleId: string,
+    zoneId?: string
+  ): Promise<McpToolResponse<any>> {
+    try {
+      const gwUrn = toGatewayUrn(edgeGatewayId);
+      await this.makeCloudApiRequest<any>(
+        'DELETE', `/edgeGateways/${gwUrn}/firewall/rules/${ruleId}`, zoneId
+      );
+      return this.formatMcpResponse(
+        { deleted: true, ruleId, message: 'Firewall rule deleted.' },
+        zoneId || this.zoneManager.getConfig().defaultZone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'DELETE_FIREWALL_RULE_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to delete firewall rule',
+        details: error,
+      });
+    }
+  }
+
+  /**
+   * Create a NAT rule (DNAT or SNAT) on an edge gateway.
+   * For DNAT: externalAddresses = public IP, internalAddresses = private IP, externalPort/internalPort for port mapping.
+   * For SNAT: externalAddresses = SNAT IP, internalAddresses = source subnet to translate.
+   */
+  async createNatRule(
+    edgeGatewayId: string,
+    natRule: {
+      name: string;
+      type: 'DNAT' | 'SNAT' | 'REFLEXIVE';
+      externalAddresses: string;
+      internalAddresses: string;
+      externalPort?: string;
+      internalPort?: string;
+      description?: string;
+      enabled?: boolean;
+      applicationPortProfileId?: string;
+      applicationPortProfileName?: string;
+      firewallMatch?: string;
+    },
+    zoneId?: string
+  ): Promise<McpToolResponse<any>> {
+    try {
+      const gwUrn = toGatewayUrn(edgeGatewayId);
+      const payload: Record<string, any> = {
+        name: natRule.name,
+        ruleType: natRule.type,
+        enabled: natRule.enabled !== false,
+        description: natRule.description || '',
+        externalAddresses: natRule.externalAddresses,
+        internalAddresses: natRule.internalAddresses,
+        firewallMatch: natRule.firewallMatch || 'MATCH_INTERNAL_ADDRESS',
+      };
+      if (natRule.externalPort) payload.dnatExternalPort = natRule.externalPort;
+      if (natRule.applicationPortProfileId) {
+        payload.applicationPortProfile = {
+          id: natRule.applicationPortProfileId,
+          displayName: natRule.applicationPortProfileName || natRule.applicationPortProfileId.split(':').pop() || '',
+        };
+      }
+      const data = await this.makeCloudApiRequest<any>(
+        'POST', `/edgeGateways/${gwUrn}/nat/rules`, zoneId, payload
+      );
+      const result = (data && Object.keys(data).length > 0) ? data : {
+        _status: 'accepted',
+        ruleName: natRule.name,
+        type: natRule.type,
+        message: 'NAT rule creation accepted. Use list_nat_rules to confirm the rule and retrieve its ID.',
+      };
+      return this.formatMcpResponse(result, zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'CREATE_NAT_RULE_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to create NAT rule',
+        details: error,
+      });
+    }
+  }
+
+  /**
+   * Delete a NAT rule by ID.
+   */
+  async deleteNatRule(
+    edgeGatewayId: string,
+    ruleId: string,
+    zoneId?: string
+  ): Promise<McpToolResponse<any>> {
+    try {
+      const gwUrn = toGatewayUrn(edgeGatewayId);
+      await this.makeCloudApiRequest<any>(
+        'DELETE', `/edgeGateways/${gwUrn}/nat/rules/${ruleId}`, zoneId
+      );
+      return this.formatMcpResponse(
+        { deleted: true, ruleId, message: 'NAT rule deleted.' },
+        zoneId || this.zoneManager.getConfig().defaultZone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'DELETE_NAT_RULE_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to delete NAT rule',
+        details: error,
+      });
+    }
+  }
+
+  /**
+   * Hard reset a VM (equivalent to pressing the reset button — no guest OS involvement).
+   * Use when shutdown/reboot fail due to unresponsive guest.
+   */
+  async resetVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vm-${vmId}/power/action/reset`
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'RESET_VM_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to reset VM',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Update the vCPU count of a VM. VM must be POWERED_OFF (status=8).
+   * coresPerSocket defaults to 1 (all cores in one socket).
+   */
+  async updateVMCpu(vmId: string, cpuCount: number, coresPerSocket: number = 1, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const payload = `<?xml version="1.0" encoding="UTF-8"?>
+<Item xmlns="http://www.vmware.com/vcloud/v1.5"
+      xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+      xmlns:vmw="http://www.vmware.com/schema/ovf">
+  <rasd:AllocationUnits>hertz * 10^6</rasd:AllocationUnits>
+  <rasd:Description>Number of Virtual CPUs</rasd:Description>
+  <rasd:ElementName>${cpuCount} virtual CPU(s)</rasd:ElementName>
+  <rasd:InstanceID>1</rasd:InstanceID>
+  <rasd:ResourceType>3</rasd:ResourceType>
+  <rasd:VirtualQuantity>${cpuCount}</rasd:VirtualQuantity>
+  <vmw:CoresPerSocket>${coresPerSocket}</vmw:CoresPerSocket>
+</Item>`;
+      const response = await this.makeRequest<string>({
+        method: 'PUT',
+        url: `/vApp/vm-${vmId}/virtualHardwareSection/cpu`,
+        data: payload,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItem+xml' }
+      }, zoneId);
+      return this.formatMcpResponse(
+        { ...parseTaskResponse(response.data), cpuCount, coresPerSocket },
+        zoneId || this.zoneManager.getConfig().defaultZone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'UPDATE_VM_CPU_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to update VM CPU — ensure VM is powered off',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Update the RAM of a VM. VM must be POWERED_OFF (status=8).
+   * memoryMB is in megabytes (e.g. 8192 = 8 GB).
+   */
+  async updateVMMemory(vmId: string, memoryMB: number, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const payload = `<?xml version="1.0" encoding="UTF-8"?>
+<Item xmlns="http://www.vmware.com/vcloud/v1.5"
+      xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData">
+  <rasd:AllocationUnits>byte * 2^20</rasd:AllocationUnits>
+  <rasd:Description>Memory Size</rasd:Description>
+  <rasd:ElementName>${memoryMB} MB of memory</rasd:ElementName>
+  <rasd:InstanceID>2</rasd:InstanceID>
+  <rasd:ResourceType>4</rasd:ResourceType>
+  <rasd:VirtualQuantity>${memoryMB}</rasd:VirtualQuantity>
+</Item>`;
+      const response = await this.makeRequest<string>({
+        method: 'PUT',
+        url: `/vApp/vm-${vmId}/virtualHardwareSection/memory`,
+        data: payload,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItem+xml' }
+      }, zoneId);
+      return this.formatMcpResponse(
+        { ...parseTaskResponse(response.data), memoryMB },
+        zoneId || this.zoneManager.getConfig().defaultZone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'UPDATE_VM_MEMORY_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to update VM memory — ensure VM is powered off',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Delete a vApp and all VMs inside it.
+   * If the vApp is still deployed (deployed=true), automatically undeployes first and
+   * polls the undeploy task before issuing DELETE.
+   */
+  async deleteVApp(vappId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      // Auto-undeploy if vApp is still deployed
+      const vappInfo = await this.getVApp(vappId, zoneId);
+      if (vappInfo.success && vappInfo.data?.deployed === true) {
+        const undeployResult = await this.undeployVApp(vappId, zoneId);
+        if (!undeployResult.success) {
+          return this.formatMcpResponse({}, zone, {
+            code: 'UNDEPLOY_BEFORE_DELETE_ERROR',
+            message: `Cannot delete: undeploy failed — ${undeployResult.error?.message}`,
+            details: undeployResult.error
+          });
+        }
+        // Poll undeploy task until complete (max 120s)
+        const taskId = undeployResult.data?.taskId;
+        const start = Date.now();
+        while ((Date.now() - start) / 1000 < 120) {
+          await new Promise(r => setTimeout(r, 5000));
+          if (!taskId) break;
+          const t = await this.getTask(taskId, zoneId);
+          const s = t.data?.taskStatus;
+          if (s === 'success') break;
+          if (s === 'error' || s === 'aborted') {
+            return this.formatMcpResponse({}, zone, {
+              code: 'UNDEPLOY_TASK_FAILED',
+              message: `Undeploy task ended with status=${s} — vApp may still be deployed`,
+              details: t.data
+            });
+          }
+        }
+      }
+
+      // DELETE returns 202 with a Task XML body
+      const response = await this.makeRequest<string>({
+        method: 'DELETE',
+        url: `/vApp/vapp-${vappId}`
+      }, zoneId);
+      const task = response.data ? parseTaskResponse(response.data) : { _status: 'accepted' };
+      return this.formatMcpResponse(
+        { ...task, vappId, message: 'vApp deletion task queued.' },
+        zone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zone, {
+        code: 'DELETE_VAPP_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to delete vApp',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Get the status of an async task by its task ID.
+   * Use after power ops, create_vapp, snapshots, etc. to poll for completion.
+   * taskId is the UUID from the taskHref returned by those operations.
+   */
+  async getTask(taskId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/task/${taskId}`
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'GET_TASK_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to get task status',
+        details: error
+      });
+    }
+  }
 }
+
+/**
+ * Convert CIDR prefix length to dotted-decimal netmask
+ */
+function prefixToNetmask(prefix: number): string {
+  const mask = ~(0xFFFFFFFF >>> prefix) >>> 0;
+  return [(mask >>> 24) & 255, (mask >>> 16) & 255, (mask >>> 8) & 255, mask & 255].join('.');
+}
+
+/**
+ * Ensure an edge gateway ID is in full URN format for CloudAPI calls.
+ * Accepts either bare UUID or urn:vcloud:gateway:{uuid}.
+ */
+function toGatewayUrn(id: string): string {
+  return id.startsWith('urn:vcloud:gateway:') ? id : `urn:vcloud:gateway:${id}`;
+}
+

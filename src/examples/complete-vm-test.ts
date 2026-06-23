@@ -1,6 +1,6 @@
 /**
  * Complete VM Test: Create vApp, VM, power operations, and firewall rules
- * Tests the full requested workflow in Perth zone
+ * Tests the full requested workflow in Jakarta zone
  */
 
 import { readFileSync } from 'fs';
@@ -35,7 +35,7 @@ async function completeVMTest(): Promise<void> {
   loadEnvFile();
 
   const client = new ZettagridClient();
-  const zone = 'perth';
+  const zone = 'jakarta';
 
   try {
     // Test authentication first

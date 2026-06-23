@@ -60,6 +60,10 @@ src-tauri/target/
 *.tmp
 *.temp
 
+# Claude Code settings
+.claude/
+
 # Markdown files (except README.md)
 *.md
 !README.md
+!CHANGELOG.md
