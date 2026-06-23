@@ -46,9 +46,9 @@ async function finalFirewallTest(): Promise<void> {
 
     // Get known working gateway IDs from previous tests
     const knownGatewayIds = [
-      '565fe69b-f5e6-4d6d-b0b1-2272fbe2be5f', // DC_1174881
-      '5aac2e6e-5e9a-4e3b-8f53-7fddfc9bbeb7', // DC_1174855
-      'f6e94860-4009-49ac-a98e-2053d0e438a6'  // SS_1175739
+      'YOUR-GATEWAY-ID-1', // example gateway
+      'YOUR-GATEWAY-ID-2', // example gateway
+      'YOUR-GATEWAY-ID-3'  // example gateway
     ];
 
     // Initialize working firewall manager
@@ -57,7 +57,7 @@ async function finalFirewallTest(): Promise<void> {
     // Test each gateway
     for (let i = 0; i < knownGatewayIds.length; i++) {
       const gatewayId = knownGatewayIds[i];
-      const gatewayName = ['DC_1174881', 'DC_1174855', 'SS_1175739'][i];
+      const gatewayName = ['gateway-1', 'gateway-2', 'gateway-3'][i];
       
       console.log(`\n${i + 1}️⃣  Testing Gateway: ${gatewayName} (${gatewayId})`);
       console.log('-'.repeat(50));

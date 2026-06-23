@@ -156,7 +156,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID to test (e.g., perth, sydney)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
@@ -170,7 +170,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional, uses default if not specified)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
@@ -188,7 +188,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['organizationId']
@@ -203,7 +203,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
@@ -221,7 +221,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['vdcId']
@@ -240,7 +240,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['vdcId']
@@ -255,7 +255,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
@@ -273,7 +273,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
@@ -291,7 +291,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
@@ -309,7 +309,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['vmId']
@@ -328,7 +328,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['vmId']
@@ -347,7 +347,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['vmId']
@@ -362,7 +362,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
@@ -380,7 +380,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['edgeGatewayId']
@@ -399,7 +399,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['edgeGatewayId']
@@ -415,9 +415,13 @@ export class ZettagridMcpServer {
                 type: 'string',
                 description: 'Edge gateway ID'
               },
+              name: {
+                type: 'string',
+                description: 'Firewall rule name (shown in UI)'
+              },
               description: {
                 type: 'string',
-                description: 'Firewall rule description'
+                description: 'Firewall rule description (optional)'
               },
               policy: {
                 type: 'string',
@@ -453,13 +457,18 @@ export class ZettagridMcpServer {
                 type: 'boolean',
                 description: 'Enable logging for this rule (default: false)'
               },
+              portProfiles: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Application port profile URNs to match (e.g. "urn:vcloud:applicationPortProfile:xxx"). Leave empty to match any application/port.'
+              },
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
-            required: ['edgeGatewayId', 'description']
+            required: ['edgeGatewayId', 'name']
           }
         },
         {
@@ -475,10 +484,193 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
             required: ['edgeGatewayId']
+          }
+        },
+        {
+          name: 'list_nat_rules',
+          description: 'List NAT rules (DNAT/SNAT) for an edge gateway via CloudAPI (NSX-T)',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              edgeGatewayId: {
+                type: 'string',
+                description: 'Edge gateway ID (UUID)'
+              },
+              zoneId: {
+                type: 'string',
+                description: 'Zone ID (optional)',
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
+              }
+            },
+            required: ['edgeGatewayId']
+          }
+        },
+        {
+          name: 'get_vm_metrics',
+          description: 'Get current VM performance metrics via CloudAPI: CPU%, RAM%, disk IOPS, network throughput (requires VCD 36+)',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: {
+                type: 'string',
+                description: 'VM UUID (from list_vms or get_vm)'
+              },
+              zoneId: {
+                type: 'string',
+                description: 'Zone ID (optional)',
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
+              }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'update_firewall_rule',
+          description: 'Update an existing firewall rule by ID on an NSX-T edge gateway',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              edgeGatewayId: { type: 'string', description: 'Edge gateway UUID' },
+              ruleId: { type: 'string', description: 'Firewall rule UUID (from list_firewall_rules)' },
+              name: { type: 'string', description: 'Rule name' },
+              description: { type: 'string', description: 'Rule description' },
+              policy: { type: 'string', enum: ['allow', 'drop', 'reject'], description: 'allow | drop | reject' },
+              isEnabled: { type: 'boolean', description: 'Enable or disable the rule' },
+              sourceIp: { type: 'string', description: 'Source IP or CIDR (omit or "Any" for any)' },
+              destinationIp: { type: 'string', description: 'Destination IP or CIDR (omit or "Any" for any)' },
+              portProfiles: { type: 'array', items: { type: 'string' }, description: 'Application port profile URNs' },
+              enableLogging: { type: 'boolean', description: 'Enable traffic logging' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['edgeGatewayId', 'ruleId', 'name', 'policy']
+          }
+        },
+        {
+          name: 'delete_firewall_rule',
+          description: 'Delete a firewall rule by ID from an NSX-T edge gateway',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              edgeGatewayId: { type: 'string', description: 'Edge gateway UUID' },
+              ruleId: { type: 'string', description: 'Firewall rule UUID (from list_firewall_rules)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['edgeGatewayId', 'ruleId']
+          }
+        },
+        {
+          name: 'create_nat_rule',
+          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              edgeGatewayId: { type: 'string', description: 'Edge gateway UUID' },
+              name: { type: 'string', description: 'Rule name' },
+              type: { type: 'string', enum: ['DNAT', 'SNAT', 'REFLEXIVE'], description: 'NAT type: DNAT (inbound port forward), SNAT (outbound masquerade), REFLEXIVE (bidirectional)' },
+              externalAddresses: { type: 'string', description: 'Public/external IP address (e.g. 203.0.113.1)' },
+              internalAddresses: { type: 'string', description: 'Private/internal IP address or subnet (e.g. 192.168.1.10)' },
+              externalPort: { type: 'string', description: 'External port number or range (e.g. "80" or "8080-8090"), omit for any' },
+              internalPort: { type: 'string', description: 'Internal port number (e.g. "80"), omit to match external' },
+              description: { type: 'string', description: 'Optional description' },
+              enabled: { type: 'boolean', description: 'Enable rule immediately (default true)' },
+              applicationPortProfileId: { type: 'string', description: 'Application port profile URN for protocol matching (optional)' },
+              applicationPortProfileName: { type: 'string', description: 'Display name for the port profile (optional)' },
+              firewallMatch: { type: 'string', enum: ['MATCH_INTERNAL_ADDRESS', 'MATCH_EXTERNAL_ADDRESS', 'BYPASS'], description: 'Firewall match mode (default: MATCH_INTERNAL_ADDRESS)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['edgeGatewayId', 'name', 'type', 'externalAddresses', 'internalAddresses']
+          }
+        },
+        {
+          name: 'delete_nat_rule',
+          description: 'Delete a NAT rule by ID from an edge gateway',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              edgeGatewayId: { type: 'string', description: 'Edge gateway UUID' },
+              ruleId: { type: 'string', description: 'NAT rule UUID (from list_nat_rules)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['edgeGatewayId', 'ruleId']
+          }
+        },
+        {
+          name: 'reset_vm',
+          description: 'Hard reset a VM (equivalent to pressing reset button). No guest OS involvement — use when shutdown/reboot fail on an unresponsive VM.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'update_vm_cpu',
+          description: 'Update the vCPU count of a VM. VM must be powered off first.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID' },
+              cpuCount: { type: 'number', description: 'Number of vCPUs (e.g. 2, 4, 8)' },
+              coresPerSocket: { type: 'number', description: 'Cores per socket (default 1 — all cores in one socket)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId', 'cpuCount']
+          }
+        },
+        {
+          name: 'update_vm_memory',
+          description: 'Update the RAM of a VM in megabytes. VM must be powered off first.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID' },
+              memoryMB: { type: 'number', description: 'Memory in MB (e.g. 1024=1GB, 2048=2GB, 4096=4GB, 8192=8GB)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId', 'memoryMB']
+          }
+        },
+        {
+          name: 'delete_vapp',
+          description: 'Delete a vApp and all VMs inside it. Automatically undeployes the vApp first if still deployed (handles suspended or mixed-state vApps). WARNING: irreversible — all VM disks and data are permanently deleted.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vappId: { type: 'string', description: 'vApp UUID (from list_vapps or create_vapp)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vappId']
+          }
+        },
+        {
+          name: 'undeploy_vapp',
+          description: 'Undeploy a vApp — removes VMs from ESXi hosts without deleting data. Forcibly powers off any running or suspended VMs. Use when you want to free ESXi host resources without deleting the vApp, or to prepare a vApp for deletion manually.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vappId: { type: 'string', description: 'vApp UUID (from list_vapps)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vappId']
+          }
+        },
+        {
+          name: 'get_task',
+          description: 'Get the current status of an async VCD task by its task ID. Use to poll for completion after power ops, create_vapp, snapshots, etc.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              taskId: { type: 'string', description: 'Task UUID (from taskId field returned by async operations)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['taskId']
           }
         },
         {
@@ -490,7 +682,7 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
@@ -504,12 +696,218 @@ export class ZettagridMcpServer {
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
-                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin']
+                enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             }
           }
         },
         {
+          name: 'get_vm',
+          description: 'Get detailed virtual machine information',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'Virtual machine ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'shutdown_vm',
+          description: 'Gracefully shutdown a virtual machine via guest OS (preferred over power_off_vm)',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'Virtual machine ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'reboot_vm',
+          description: 'Gracefully reboot a virtual machine via guest OS',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'Virtual machine ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'suspend_vm',
+          description: 'Suspend a virtual machine',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'Virtual machine ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'get_vapp',
+          description: 'Get detailed vApp information',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vappId: { type: 'string', description: 'vApp ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vappId']
+          }
+        },
+        {
+          name: 'power_on_vapp',
+          description: 'Power on a vApp and all its VMs',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vappId: { type: 'string', description: 'vApp ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vappId']
+          }
+        },
+        {
+          name: 'power_off_vapp',
+          description: 'Power off a vApp. WARNING: hard power-off.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vappId: { type: 'string', description: 'vApp ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vappId']
+          }
+        },
+        {
+          name: 'create_vapp',
+          description: 'Deploy a new vApp from a catalog template',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vdcId: { type: 'string', description: 'Target VDC ID' },
+              templateId: { type: 'string', description: 'Catalog template href/ID (from list_catalog_items)' },
+              vappName: { type: 'string', description: 'Name for the new vApp' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vdcId', 'templateId', 'vappName']
+          }
+        },
+        {
+          name: 'list_disks',
+          description: 'List named independent disks',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            }
+          }
+        },
+        {
+          name: 'list_tasks',
+          description: 'List recent asynchronous tasks (useful for checking status after power/resize operations)',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            }
+          }
+        },
+        {
+          name: 'list_org_networks',
+          description: 'List organization VDC networks',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            }
+          }
+        },
+        {
+          name: 'list_catalogs',
+          description: 'List catalogs available in the organization',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            }
+          }
+        },
+        {
+          name: 'list_catalog_items',
+          description: 'List catalog items (vApp templates) — use this to find templateId for create_vapp',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              catalogId: { type: 'string', description: 'Catalog ID to filter by (optional, lists from all catalogs if omitted)' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            }
+          }
+        },
+        {
+          name: 'list_snapshots',
+          description: 'List snapshots for a VM',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'Virtual machine ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'create_snapshot',
+          description: 'Create a snapshot of a VM\'s current state',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'Virtual machine ID' },
+              snapshotName: { type: 'string', description: 'Snapshot name (optional)' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'revert_snapshot',
+          description: 'Revert a VM to its current (most recent) snapshot',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'Virtual machine ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'remove_snapshots',
+          description: 'Remove all snapshots for a VM',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'Virtual machine ID' },
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'get_zone_health',
+          description: 'Get health status across all configured zones (session stats, validation results)',
+          inputSchema: {
+            type: 'object',
+            properties: {}
+          }
+        },
+                {
           name: 'get_zone_info',
           description: 'Get information about available zones and current configuration',
           inputSchema: {
@@ -535,9 +933,24 @@ export class ZettagridMcpServer {
         let result: McpToolResponse;
         let responseText: string | undefined;
 
+        const req = (param: string): string => {
+          const val = args?.[param];
+          if (val === undefined || val === null || val === '') {
+            throw new McpError(ErrorCode.InvalidParams, `'${param}' is required for tool '${name}'`);
+          }
+          return val as string;
+        };
+        const reqNum = (param: string): number => {
+          const val = args?.[param];
+          if (val === undefined || val === null) {
+            throw new McpError(ErrorCode.InvalidParams, `'${param}' is required for tool '${name}'`);
+          }
+          return val as number;
+        };
+
         switch (name) {
           case 'test_zone':
-            result = await this.client.testZone(args?.zoneId as string);
+            result = await this.client.testZone(req('zoneId'));
             break;
 
           case 'list_organizations':
@@ -545,7 +958,7 @@ export class ZettagridMcpServer {
             break;
 
           case 'get_organization':
-            result = await this.client.getOrganization(args?.organizationId as string, args?.zoneId as string | undefined);
+            result = await this.client.getOrganization(req('organizationId'), args?.zoneId as string | undefined);
             break;
 
           case 'list_vdcs':
@@ -553,11 +966,11 @@ export class ZettagridMcpServer {
             break;
 
           case 'get_vdc':
-            result = await this.client.getVdc(args?.vdcId as string, args?.zoneId as string | undefined);
+            result = await this.client.getVdc(req('vdcId'), args?.zoneId as string | undefined);
             break;
 
           case 'show_vdc_resources':
-            result = await this.client.showVdcResources(args?.vdcId as string, args?.zoneId as string | undefined);
+            result = await this.client.showVdcResources(req('vdcId'), args?.zoneId as string | undefined);
             if (result.success && result.data) {
               responseText = this.formatVdcResourcesTable(result.data as VdcResourceSummary);
             }
@@ -579,15 +992,15 @@ export class ZettagridMcpServer {
             break;
 
           case 'power_on_vm':
-            result = await this.client.powerOnVM(args?.vmId as string, args?.zoneId as string | undefined);
+            result = await this.client.powerOnVM(req('vmId'), args?.zoneId as string | undefined);
             break;
 
           case 'power_off_vm':
-            result = await this.client.powerOffVM(args?.vmId as string, args?.zoneId as string | undefined);
+            result = await this.client.powerOffVM(req('vmId'), args?.zoneId as string | undefined);
             break;
 
           case 'get_vm_console':
-            result = await this.client.getVMConsole(args?.vmId as string, args?.zoneId as string | undefined);
+            result = await this.client.getVMConsole(req('vmId'), args?.zoneId as string | undefined);
             break;
 
           case 'list_edge_gateways':
@@ -595,23 +1008,25 @@ export class ZettagridMcpServer {
             break;
 
           case 'get_edge_gateway':
-            result = await this.client.getEdgeGateway(args?.edgeGatewayId as string, args?.zoneId as string | undefined);
+            result = await this.client.getEdgeGateway(req('edgeGatewayId'), args?.zoneId as string | undefined);
             break;
 
           case 'list_firewall_rules':
-            result = await this.client.listFirewallRules(args?.edgeGatewayId as string, args?.zoneId as string | undefined);
+            result = await this.client.listFirewallRules(req('edgeGatewayId'), args?.zoneId as string | undefined);
             break;
 
-          case 'create_firewall_rule':
+          case 'create_firewall_rule': {
             const firewallRule = {
-              description: args?.description as string,
-              policy: args?.policy as 'allow' | 'drop',
+              name: (args?.name || args?.description) as string,
+              description: (args?.description || args?.name) as string,
+              policy: req('policy') as 'allow' | 'drop',
               sourceIp: args?.sourceIp as string,
               destinationIp: args?.destinationIp as string,
               sourcePortRange: args?.sourcePortRange as string,
               destinationPortRange: args?.destinationPortRange as string,
               isEnabled: args?.isEnabled as boolean,
               enableLogging: args?.enableLogging as boolean,
+              portProfiles: args?.portProfiles as string[] | undefined,
               protocols: {
                 tcp: args?.protocol === 'tcp' || args?.protocol === 'any',
                 udp: args?.protocol === 'udp' || args?.protocol === 'any',
@@ -619,15 +1034,129 @@ export class ZettagridMcpServer {
               }
             };
             result = await this.client.createFirewallRule(
-              args?.edgeGatewayId as string, 
-              firewallRule, 
+              req('edgeGatewayId'),
+              firewallRule,
+              args?.zoneId as string | undefined
+            );
+            break;
+          }
+
+          case 'show_edge_network_config':
+            result = await this.client.showEdgeNetworkConfig(
+              req('edgeGatewayId'),
               args?.zoneId as string | undefined
             );
             break;
 
-          case 'show_edge_network_config':
-            result = await this.client.showEdgeNetworkConfig(
-              args?.edgeGatewayId as string, 
+          case 'list_nat_rules':
+            result = await this.client.listNatRules(
+              req('edgeGatewayId'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'get_vm_metrics':
+            result = await this.client.getVmMetrics(
+              req('vmId'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'update_firewall_rule':
+            result = await this.client.updateFirewallRule(
+              req('edgeGatewayId'),
+              req('ruleId'),
+              {
+                name: req('name'),
+                description: args?.description as string | undefined,
+                policy: args?.policy as string | undefined,
+                isEnabled: args?.isEnabled as boolean | undefined,
+                sourceIp: args?.sourceIp as string | undefined,
+                destinationIp: args?.destinationIp as string | undefined,
+                portProfiles: args?.portProfiles as string[] | undefined,
+                enableLogging: args?.enableLogging as boolean | undefined,
+              } as any,
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'delete_firewall_rule':
+            result = await this.client.deleteFirewallRule(
+              req('edgeGatewayId'),
+              req('ruleId'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'create_nat_rule':
+            result = await this.client.createNatRule(
+              req('edgeGatewayId'),
+              {
+                name: req('name'),
+                type: req('type') as 'DNAT' | 'SNAT' | 'REFLEXIVE',
+                externalAddresses: req('externalAddresses'),
+                internalAddresses: req('internalAddresses'),
+                ...(args?.externalPort !== undefined && { externalPort: args.externalPort as string }),
+                ...(args?.internalPort !== undefined && { internalPort: args.internalPort as string }),
+                ...(args?.description !== undefined && { description: args.description as string }),
+                ...(args?.enabled !== undefined && { enabled: args.enabled as boolean }),
+                ...(args?.applicationPortProfileId !== undefined && { applicationPortProfileId: args.applicationPortProfileId as string }),
+                ...(args?.applicationPortProfileName !== undefined && { applicationPortProfileName: args.applicationPortProfileName as string }),
+                ...(args?.firewallMatch !== undefined && { firewallMatch: args.firewallMatch as string }),
+              },
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'delete_nat_rule':
+            result = await this.client.deleteNatRule(
+              req('edgeGatewayId'),
+              req('ruleId'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'reset_vm':
+            result = await this.client.resetVM(
+              req('vmId'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'update_vm_cpu':
+            result = await this.client.updateVMCpu(
+              req('vmId'),
+              reqNum('cpuCount'),
+              args?.coresPerSocket as number | undefined,
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'update_vm_memory':
+            result = await this.client.updateVMMemory(
+              req('vmId'),
+              reqNum('memoryMB'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'delete_vapp':
+            result = await this.client.deleteVApp(
+              req('vappId'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'undeploy_vapp':
+            result = await this.client.undeployVApp(
+              req('vappId'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'get_task':
+            result = await this.client.getTask(
+              req('taskId'),
               args?.zoneId as string | undefined
             );
             break;
@@ -638,6 +1167,87 @@ export class ZettagridMcpServer {
 
           case 'get_provider_network_info':
             result = await this.client.getProviderNetworkInfo(args?.zoneId as string | undefined);
+            break;
+
+          case 'get_vm':
+            result = await this.client.getVM(req('vmId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'shutdown_vm':
+            result = await this.client.shutdownVM(req('vmId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'reboot_vm':
+            result = await this.client.rebootVM(req('vmId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'suspend_vm':
+            result = await this.client.suspendVM(req('vmId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'get_vapp':
+            result = await this.client.getVApp(req('vappId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'power_on_vapp':
+            result = await this.client.powerOnVApp(req('vappId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'power_off_vapp':
+            result = await this.client.powerOffVApp(req('vappId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'create_vapp':
+            result = await this.client.createVApp(
+              req('vdcId'),
+              req('templateId'),
+              req('vappName'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'list_disks':
+            result = await this.client.listDisks(args?.zoneId as string | undefined);
+            break;
+
+          case 'list_tasks':
+            result = await this.client.listTasks(args?.zoneId as string | undefined);
+            break;
+
+          case 'list_org_networks':
+            result = await this.client.listOrgNetworks(args?.zoneId as string | undefined);
+            break;
+
+          case 'list_catalogs':
+            result = await this.client.listCatalogs(args?.zoneId as string | undefined);
+            break;
+
+          case 'list_catalog_items':
+            result = await this.client.listCatalogItems(args?.catalogId as string | undefined, args?.zoneId as string | undefined);
+            break;
+
+          case 'list_snapshots':
+            result = await this.client.listSnapshots(req('vmId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'create_snapshot':
+            result = await this.client.createSnapshot(
+              req('vmId'),
+              args?.snapshotName as string | undefined,
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'revert_snapshot':
+            result = await this.client.revertSnapshot(req('vmId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'remove_snapshots':
+            result = await this.client.removeAllSnapshots(req('vmId'), args?.zoneId as string | undefined);
+            break;
+
+          case 'get_zone_health':
+            result = await this.client.getZoneHealth();
             break;
 
           case 'get_zone_info':
@@ -661,6 +1271,9 @@ export class ZettagridMcpServer {
           ]
         };
       } catch (error) {
+        if (error instanceof McpError) {
+          throw error;
+        }
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
         throw new McpError(
           ErrorCode.InternalError,

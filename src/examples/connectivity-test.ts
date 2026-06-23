@@ -1,6 +1,6 @@
 /**
  * Simple test script to validate Zettagrid API connectivity
- * Tests basic authentication and API operations against Perth zone
+ * Tests basic authentication and API operations against Jakarta zone
  */
 
 import { readFileSync } from 'fs';
@@ -46,32 +46,32 @@ async function testZettagridConnectivity(): Promise<void> {
     console.log(`   Default zone: ${zoneStats.defaultZone}`);
     console.log(`   Total configured zones: ${zoneStats.configuredZones}/${zoneStats.totalZones}`);
 
-    // Validate Perth zone configuration
-    console.log('\n🔧 Validating Perth Zone Configuration...');
-    const perthValidation = zoneManager.validateZoneConfig('perth');
+    // Validate Jakarta zone configuration
+    console.log('\n🔧 Validating Jakarta Zone Configuration...');
+    const jakartaValidation = zoneManager.validateZoneConfig('jakarta');
     
-    if (perthValidation.valid) {
-      console.log('✅ Perth zone configuration is valid');
-      const perthConfig = zoneManager.getZoneConfig('perth');
-      console.log(`   Endpoint: ${perthConfig.apiEndpoint}`);
-      console.log(`   Organization: ${perthConfig.organizationName}`);
-      console.log(`   API Version: ${perthConfig.apiVersion}`);
-      console.log(`   Token: ${perthConfig.apiToken.substring(0, 8)}...`);
+    if (jakartaValidation.valid) {
+      console.log('✅ Jakarta zone configuration is valid');
+      const jakartaConfig = zoneManager.getZoneConfig('jakarta');
+      console.log(`   Endpoint: ${jakartaConfig.apiEndpoint}`);
+      console.log(`   Organization: ${jakartaConfig.organizationName}`);
+      console.log(`   API Version: ${jakartaConfig.apiVersion}`);
+      console.log(`   Token: ${jakartaConfig.apiToken.substring(0, 8)}...`);
     } else {
-      console.log('❌ Perth zone configuration is invalid:');
-      perthValidation.errors.forEach(error => console.log(`   - ${error}`));
+      console.log('❌ Jakarta zone configuration is invalid:');
+      jakartaValidation.errors.forEach(error => console.log(`   - ${error}`));
       return;
     }
 
     // Test basic connectivity
-    console.log('\n🌐 Testing Perth Zone Connectivity...');
-    const connectivityResult = await zoneManager.testZoneConnectivity('perth');
+    console.log('\n🌐 Testing Jakarta Zone Connectivity...');
+    const connectivityResult = await zoneManager.testZoneConnectivity('jakarta');
     
     if (connectivityResult.success) {
-      console.log(`✅ Perth zone connectivity test passed`);
+      console.log(`✅ Jakarta zone connectivity test passed`);
       console.log(`   Response time: ${connectivityResult.responseTime}ms`);
     } else {
-      console.log(`❌ Perth zone connectivity test failed: ${connectivityResult.error}`);
+      console.log(`❌ Jakarta zone connectivity test failed: ${connectivityResult.error}`);
       console.log('   This might indicate network issues or incorrect endpoint configuration');
     }
 
@@ -81,7 +81,7 @@ async function testZettagridConnectivity(): Promise<void> {
     
     // Test zone information
     console.log('\n📊 Getting Zone Information...');
-    const zoneInfoResult = await client.getZoneInfo('perth');
+    const zoneInfoResult = await client.getZoneInfo('jakarta');
     
     if (zoneInfoResult.success) {
       console.log('✅ Zone information retrieved successfully:');
@@ -95,7 +95,7 @@ async function testZettagridConnectivity(): Promise<void> {
 
     // Test authentication
     console.log('\n🔐 Testing Authentication...');
-    const authTestResult = await client.testZone('perth');
+    const authTestResult = await client.testZone('jakarta');
     
     if (authTestResult.success) {
       console.log('✅ Authentication test passed');
@@ -112,7 +112,7 @@ async function testZettagridConnectivity(): Promise<void> {
 
     // Test basic API operations
     console.log('\n🏢 Testing Organization Operations...');
-    const orgListResult = await client.listOrganizations('perth');
+    const orgListResult = await client.listOrganizations('jakarta');
     
     if (orgListResult.success) {
       console.log('✅ Organization listing succeeded');
@@ -124,7 +124,7 @@ async function testZettagridConnectivity(): Promise<void> {
 
     // Test VDC operations
     console.log('\n🏗️  Testing VDC Operations...');
-    const vdcListResult = await client.listVdcs('perth');
+    const vdcListResult = await client.listVdcs('jakarta');
     
     if (vdcListResult.success) {
       console.log('✅ VDC listing succeeded');
@@ -136,7 +136,7 @@ async function testZettagridConnectivity(): Promise<void> {
 
     // Test vApp operations
     console.log('\n📱 Testing vApp Operations...');
-    const vappListResult = await client.listVApps(undefined, 'perth');
+    const vappListResult = await client.listVApps(undefined, 'jakarta');
     
     if (vappListResult.success) {
       console.log('✅ vApp listing succeeded');
@@ -148,7 +148,7 @@ async function testZettagridConnectivity(): Promise<void> {
 
     // Test VM operations
     console.log('\n💻 Testing VM Operations...');
-    const vmListResult = await client.listVMs(undefined, 'perth');
+    const vmListResult = await client.listVMs(undefined, 'jakarta');
     
     if (vmListResult.success) {
       console.log('✅ VM listing succeeded');
