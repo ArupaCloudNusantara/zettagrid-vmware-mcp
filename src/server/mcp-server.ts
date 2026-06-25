@@ -638,6 +638,32 @@ export class ZettagridMcpServer {
           }
         },
         {
+          name: 'update_vm_disk',
+          description: 'Resize the boot disk (DiskId 2000) of a VM. VM must be powered off. Disk size can only be increased, not decreased.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID' },
+              diskSizeMB: { type: 'number', description: 'New disk size in MB (e.g. 20480=20GB, 51200=50GB)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId', 'diskSizeMB']
+          }
+        },
+        {
+          name: 'update_vm_computer_name',
+          description: 'Update the computer name (hostname) of a VM in VCD. Must be called while the VM is powered off and BEFORE power-on. VCD injects this value as vCloud_computerName into the VM\'s OVF environment; open-vm-tools reads it on first boot and sets the OS hostname. For Ubuntu cloud-init VMs use this after instantiation and before power-on to ensure the correct hostname is set.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID' },
+              computerName: { type: 'string', description: 'Desired computer name / hostname (e.g. "my-vm-01")' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId', 'computerName']
+          }
+        },
+        {
           name: 'delete_vapp',
           description: 'Delete a vApp and all VMs inside it. Automatically undeployes the vApp first if still deployed (handles suspended or mixed-state vApps). WARNING: irreversible — all VM disks and data are permanently deleted.',
           inputSchema: {
@@ -787,14 +813,91 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_vapp',
-          description: 'Deploy a new vApp from a catalog template',
+          description: 'Deploy a new vApp from a catalog template. Auto-discovers VDC networks: if vmConfigs omit networkConnections and only one routed network exists it is used automatically (POOL mode); if multiple networks exist the tool returns CLARIFICATION_REQUIRED with the list — ask the user which network to use before retrying. Use list_org_networks to inspect available networks beforehand.',
           inputSchema: {
             type: 'object',
             properties: {
               vdcId: { type: 'string', description: 'Target VDC ID' },
               templateId: { type: 'string', description: 'Catalog template href/ID (from list_catalog_items)' },
               vappName: { type: 'string', description: 'Name for the new vApp' },
-              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+              zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] },
+              instantiationParams: {
+                type: 'object',
+                description: 'Optional instantiation parameters for the vApp and its VMs',
+                properties: {
+                  networkConfig: {
+                    type: 'array',
+                    description: 'vApp-level network fence configuration',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        networkName: { type: 'string', description: 'Name of the network' },
+                        parentNetworkHref: { type: 'string', description: 'Href of the parent org network to connect to' },
+                        fenceMode: { type: 'string', enum: ['bridged', 'isolated', 'natRouted'], description: 'Network fence mode' }
+                      },
+                      required: ['networkName', 'fenceMode']
+                    }
+                  },
+                  vmConfigs: {
+                    type: 'array',
+                    description: 'Per-VM configuration (one entry per VM in the template). Supports compute, storage, network, and OVF cloud-init properties.',
+                    items: {
+                      type: 'object',
+                      properties: {
+                        vmName: { type: 'string', description: 'VM display name (overrides template default)' },
+                        description: { type: 'string', description: 'VM description' },
+                        cpuCount: { type: 'number', description: 'Number of vCPUs' },
+                        coresPerSocket: { type: 'number', description: 'CPU cores per socket' },
+                        memoryMB: { type: 'number', description: 'RAM in MB' },
+                        diskSizeMB: { type: 'number', description: 'Boot disk size in MB' },
+                        storageProfileHref: { type: 'string', description: 'Storage policy href' },
+                        storageProfileName: { type: 'string', description: 'Storage policy name' },
+                        networkConnections: {
+                          type: 'array',
+                          description: 'VM NIC connections to org VDC networks',
+                          items: {
+                            type: 'object',
+                            properties: {
+                              networkName: { type: 'string', description: 'Org VDC network name to connect to' },
+                              ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode' },
+                              ipAddress: { type: 'string', description: 'Static IP (required when ipMode=MANUAL)' },
+                              isPrimary: { type: 'boolean', description: 'Set as primary NIC (default: first NIC)' },
+                              index: { type: 'number', description: 'NIC index (default: array position)' }
+                            },
+                            required: ['networkName', 'ipMode']
+                          }
+                        },
+                        ovfProperties: {
+                          type: 'array',
+                          description: 'OVF ProductSection properties for cloud-init (Ubuntu). Keys: hostname, instance-id (required), password, public-keys, user-data (base64), seedfrom',
+                          items: {
+                            type: 'object',
+                            properties: {
+                              key: { type: 'string' },
+                              value: { type: 'string' }
+                            },
+                            required: ['key', 'value']
+                          }
+                        },
+                        guestCustomization: {
+                          type: 'object',
+                          description: 'Guest OS customization (Windows VMs / VCD guest tools)',
+                          properties: {
+                            enabled: { type: 'boolean' },
+                            computerName: { type: 'string' },
+                            adminPasswordEnabled: { type: 'boolean' },
+                            adminPasswordAuto: { type: 'boolean' },
+                            adminPassword: { type: 'string' },
+                            resetPasswordRequired: { type: 'boolean' },
+                            customizationScript: { type: 'string' },
+                            changeSid: { type: 'boolean' }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
             },
             required: ['vdcId', 'templateId', 'vappName']
           }
@@ -1132,10 +1235,26 @@ export class ZettagridMcpServer {
             );
             break;
 
+          case 'update_vm_disk':
+            result = await this.client.updateVMDisk(
+              req('vmId'),
+              reqNum('diskSizeMB'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
           case 'update_vm_memory':
             result = await this.client.updateVMMemory(
               req('vmId'),
               reqNum('memoryMB'),
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'update_vm_computer_name':
+            result = await this.client.updateVMComputerName(
+              req('vmId'),
+              req('computerName'),
               args?.zoneId as string | undefined
             );
             break;
@@ -1202,7 +1321,8 @@ export class ZettagridMcpServer {
               req('vdcId'),
               req('templateId'),
               req('vappName'),
-              args?.zoneId as string | undefined
+              args?.zoneId as string | undefined,
+              args?.instantiationParams as import('../types.js').VAppInstantiationParams | undefined
             );
             break;
 

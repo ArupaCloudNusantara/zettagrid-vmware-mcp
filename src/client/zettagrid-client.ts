@@ -6,9 +6,9 @@
 import { ZoneManager } from '../managers/zone-manager.js';
 import { TokenManager } from '../auth/token-manager.js';
 import { ZoneAuth } from '../auth/zone-auth.js';
-import { 
-  ApiRequestConfig, 
-  ApiResponse, 
+import {
+  ApiRequestConfig,
+  ApiResponse,
   McpToolResponse,
   Organization,
   Vdc,
@@ -24,7 +24,9 @@ import {
   ExternalNetworkInfo,
   ProviderNetworkInfo,
   PaginationParams,
-  ListResponse
+  ListResponse,
+  VAppInstantiationParams,
+  VAppVmConfig
 } from '../types.js';
 import {
   parseVdcRecords,
@@ -784,6 +786,43 @@ export class ZettagridClient {
   }
 
   /**
+   * Update GuestCustomizationSection.ComputerName on a powered-off VM.
+   * VCD uses this value to populate vCloud_computerName in guestinfo on the next boot,
+   * which open-vm-tools reads to set the OS hostname.
+   */
+  async updateVMComputerName(vmId: string, computerName: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    try {
+      const getResp = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vApp/vm-${vmId}/guestCustomizationSection`
+      }, zoneId);
+
+      const currentXml = getResp.data as unknown as string;
+      const updatedXml = currentXml.includes('<ComputerName>')
+        ? currentXml.replace(/<ComputerName>[^<]*<\/ComputerName>/, `<ComputerName>${computerName}</ComputerName>`)
+        : currentXml.replace('</GuestCustomizationSection>', `    <ComputerName>${computerName}</ComputerName>\n</GuestCustomizationSection>`);
+
+      const putResp = await this.makeRequest<string>({
+        method: 'PUT',
+        url: `/vApp/vm-${vmId}/guestCustomizationSection`,
+        data: updatedXml,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.guestCustomizationSection+xml' }
+      }, zoneId);
+
+      return this.formatMcpResponse(
+        parseTaskResponse(putResp.data as unknown as string),
+        zoneId || this.zoneManager.getConfig().defaultZone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+        code: 'UPDATE_COMPUTER_NAME_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to update computer name',
+        details: error
+      });
+    }
+  }
+
+  /**
    * Power on VM
    */
   async powerOnVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
@@ -905,29 +944,254 @@ export class ZettagridClient {
     }
   }
 
-  /**
-   * Create a new vApp from template
-   */
-  async createVApp(vdcId: string, templateId: string, vappName: string, zoneId?: string): Promise<McpToolResponse<any>> {
+  /** Build vApp-level InstantiationParams (NetworkConfigSection only) */
+  private buildVAppInstantiationParamsXml(params?: VAppInstantiationParams): string {
+    if (!params?.networkConfig?.length) return '';
+    const configs = params.networkConfig.map(nc => {
+      const parent = nc.parentNetworkHref ? `<ParentNetwork href="${nc.parentNetworkHref}" />` : '';
+      return `<NetworkConfig networkName="${nc.networkName}">
+            <Configuration>
+                ${parent}
+                <FenceMode>${nc.fenceMode}</FenceMode>
+            </Configuration>
+        </NetworkConfig>`;
+    }).join('\n        ');
+    return `\n    <InstantiationParams>
+        <NetworkConfigSection>
+            <ovf:Info xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">Network config</ovf:Info>
+            ${configs}
+        </NetworkConfigSection>
+    </InstantiationParams>`;
+  }
+
+  /** Fetch routed org VDC networks available in a given VDC for auto-discovery during VM creation */
+  private async fetchVdcNetworkOptions(vdcId: string, zoneId?: string): Promise<Array<{
+    name: string; href: string; defaultGateway?: string; subnetPrefixLength?: number;
+    availableIps: number; totalIps: number;
+  }>> {
     try {
-      // vApp creation payload
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: '/query',
+        params: { type: 'orgVdcNetwork' }
+      }, zoneId);
+      const xml = response.data as unknown as string;
+      const records = parseQueryResults(xml);
+      return records
+        .filter(r => r.vdc && String(r.vdc).includes(vdcId) && Number(r.linkType) === 1)
+        .map(r => ({
+          name: String(r.name ?? ''),
+          href: String(r.href ?? ''),
+          defaultGateway: r.defaultGateway ? String(r.defaultGateway) : undefined,
+          subnetPrefixLength: r.subnetPrefixLength ? Number(r.subnetPrefixLength) : undefined,
+          availableIps: (Number(r.totalIpCount) || 0) - (Number(r.usedIpCount) || 0),
+          totalIps: Number(r.totalIpCount) || 0,
+        }));
+    } catch {
+      return [];
+    }
+  }
+
+  /** Fetch VM hrefs from a vAppTemplate — returns hrefs like /vAppTemplate/vm-UUID */
+  private async fetchTemplateVmHrefs(templateHref: string, zoneId?: string): Promise<string[]> {
+    try {
+      // templateHref is an absolute URL; makeRequest expects a path relative to the /api base
+      const pathMatch = templateHref.match(/\/api(\/.+)/);
+      const relativePath = pathMatch?.[1] ?? templateHref;
+      const response = await this.makeRequest<string>({ method: 'GET', url: relativePath }, zoneId);
+      const xml = response.data as unknown as string;
+      const vmHrefs: string[] = [];
+      const re = /<Vm\b[^>]*\shref="([^"]+)"/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(xml)) !== null) {
+        const href = m[1];
+        if (href && !vmHrefs.includes(href)) vmHrefs.push(href);
+      }
+      return vmHrefs;
+    } catch {
+      return [];
+    }
+  }
+
+  /** Build a complete SourcedItem XML block for one VM */
+  private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string): string {
+    const vmName = vmConfig.vmName ?? fallbackName;
+    const instSections: string[] = [];
+
+    // Network connections
+    if (vmConfig.networkConnections?.length) {
+      const primary = vmConfig.networkConnections.find(n => n.isPrimary !== false) ?? vmConfig.networkConnections[0]!;
+      const primaryIdx = vmConfig.networkConnections.indexOf(primary);
+      const nics = vmConfig.networkConnections.map((nc, i) => {
+        const idx = nc.index ?? i;
+        const ipLine = nc.ipMode === 'MANUAL' && nc.ipAddress ? `<IpAddress>${nc.ipAddress}</IpAddress>` : '';
+        return `<NetworkConnection network="${nc.networkName}">
+                <NetworkConnectionIndex>${idx}</NetworkConnectionIndex>
+                ${ipLine}
+                <IsConnected>true</IsConnected>
+                <IpAddressAllocationMode>${nc.ipMode}</IpAddressAllocationMode>
+            </NetworkConnection>`;
+      }).join('\n            ');
+      instSections.push(`<NetworkConnectionSection>
+            <ovf:Info xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">Network connections</ovf:Info>
+            <PrimaryNetworkConnectionIndex>${primaryIdx}</PrimaryNetworkConnectionIndex>
+            ${nics}
+        </NetworkConnectionSection>`);
+    }
+
+    // OVF ProductSection (cloud-init for Ubuntu) — must be ovf:ProductSection directly, not wrapped in ProductSectionList
+    if (vmConfig.ovfProperties?.length) {
+      const props = vmConfig.ovfProperties.map(p =>
+        `<ovf:Property ovf:key="${p.key}" ovf:type="string" ovf:value="${p.value}"/>`
+      ).join('\n            ');
+      instSections.push(`<ovf:ProductSection xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">
+            <ovf:Info>OVF properties</ovf:Info>
+            ${props}
+        </ovf:ProductSection>`);
+    }
+
+    // Guest customization — only for Windows/VCD-tools VMs where the caller explicitly
+    // provides guestCustomization. For Linux cloud-init VMs we leave this out; combined
+    // with NeedsCustomization:false below, VCD's open-vm-tools customization agent is
+    // suppressed entirely and cloud-init owns hostname + network configuration.
+    if (vmConfig.guestCustomization) {
+      const gc = vmConfig.guestCustomization;
+      const fields = [
+        gc.enabled !== undefined             ? `<Enabled>${gc.enabled}</Enabled>` : '',
+        gc.changeSid !== undefined           ? `<ChangeSid>${gc.changeSid}</ChangeSid>` : '',
+        gc.adminPasswordEnabled !== undefined ? `<AdminPasswordEnabled>${gc.adminPasswordEnabled}</AdminPasswordEnabled>` : '',
+        gc.adminPasswordAuto !== undefined    ? `<AdminPasswordAuto>${gc.adminPasswordAuto}</AdminPasswordAuto>` : '',
+        gc.adminPassword                      ? `<AdminPassword>${gc.adminPassword}</AdminPassword>` : '',
+        gc.resetPasswordRequired !== undefined ? `<ResetPasswordRequired>${gc.resetPasswordRequired}</ResetPasswordRequired>` : '',
+        gc.computerName                       ? `<ComputerName>${gc.computerName}</ComputerName>` : '',
+        gc.customizationScript                ? `<CustomizationScript>${gc.customizationScript}</CustomizationScript>` : '',
+      ].filter(Boolean).join('\n            ');
+      instSections.push(`<GuestCustomizationSection>
+            <ovf:Info xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">Guest customization</ovf:Info>
+            ${fields}
+        </GuestCustomizationSection>`);
+    }
+
+    const instParamsXml = instSections.length
+      ? `\n        <InstantiationParams>\n            ${instSections.join('\n            ')}\n        </InstantiationParams>`
+      : '';
+
+    // StorageProfile is a direct child of SourcedItem
+    const storageProfileXml = vmConfig.storageProfileHref
+      ? `\n        <StorageProfile href="${vmConfig.storageProfileHref}" type="application/vnd.vmware.vcloud.vdcStorageProfile+xml" name="${vmConfig.storageProfileName ?? ''}" />`
+      : '';
+
+    // CPU/memory/disk cannot be set during instantiateVAppTemplate.
+    // SourcedCompositionItemParam does not support VmSpecSection.
+    // ComputePolicy only accepts VmSizingPolicy/VmPlacementPolicy hrefs (named policies).
+    // Resize CPU/memory/disk post-instantiation via PUT /vApp/vm-{id}/vmSpecSection.
+
+    return `
+    <SourcedItem>
+        <Source href="${vmHref}" />
+        <VmGeneralParams>
+            <Name>${vmName}</Name>
+            <NeedsCustomization>${vmConfig.guestCustomization ? 'true' : 'false'}</NeedsCustomization>
+        </VmGeneralParams>${instParamsXml}${storageProfileXml}
+    </SourcedItem>`;
+  }
+
+  /**
+   * Create a new vApp from template.
+   * Auto-discovers VDC networks when vmConfigs have no networkConnections:
+   *   - 1 routed network  → uses it automatically (POOL mode)
+   *   - 2+ routed networks → returns CLARIFICATION_REQUIRED with available options
+   *   - 0 routed networks  → proceeds without network (isolated VM)
+   */
+  async createVApp(vdcId: string, templateId: string, vappName: string, zoneId?: string, instantiationParams?: VAppInstantiationParams): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      // Legacy: map old guestCustomization into vmConfigs[0]
+      const effectiveVmConfigs: VAppVmConfig[] = instantiationParams?.vmConfigs?.length
+        ? instantiationParams.vmConfigs
+        : (instantiationParams?.guestCustomization
+            ? [{ guestCustomization: instantiationParams.guestCustomization }]
+            : []);
+
+      // Auto-discover VDC networks when no VM has networkConnections specified
+      let resolvedParams = instantiationParams;
+      let autoConfigured: { network: string; ipMode: string } | undefined;
+
+      const wantsNetworkDiscovery = effectiveVmConfigs.length > 0
+        && effectiveVmConfigs.every(c => !c.networkConnections?.length);
+
+      if (wantsNetworkDiscovery) {
+        const nets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
+
+        if (nets.length > 1) {
+          return this.formatMcpResponse(
+            {
+              needsClarification: true,
+              availableNetworks: nets.map(n => ({
+                networkName: n.name,
+                availableIps: n.availableIps,
+                gateway: n.defaultGateway,
+                prefix: n.subnetPrefixLength,
+                ipMode: 'POOL'
+              }))
+            },
+            zone,
+            {
+              code: 'CLARIFICATION_REQUIRED',
+              message: `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + ipMode). Available options are in data.availableNetworks.`,
+            }
+          );
+        }
+
+        if (nets.length === 1) {
+          const net = nets[0]!;
+          autoConfigured = { network: net.name, ipMode: 'POOL' };
+          resolvedParams = {
+            ...instantiationParams,
+            networkConfig: instantiationParams?.networkConfig?.length
+              ? instantiationParams.networkConfig
+              : [{ networkName: net.name, parentNetworkHref: net.href, fenceMode: 'bridged' }],
+            vmConfigs: effectiveVmConfigs.map(c => ({
+              ...c,
+              networkConnections: [{ networkName: net.name, ipMode: 'POOL' as const }]
+            }))
+          };
+        }
+        // 0 networks → proceed without network config
+      }
+
+      const resolvedVmConfigs: VAppVmConfig[] = resolvedParams?.vmConfigs ?? effectiveVmConfigs;
+      const vappInstParamsXml = this.buildVAppInstantiationParamsXml(resolvedParams);
+
+      // Build SourcedItem blocks — one per VM in the template
+      let sourcedItemsXml = '';
+      if (resolvedVmConfigs.length > 0) {
+        const vmHrefs = await this.fetchTemplateVmHrefs(templateId, zoneId);
+        if (vmHrefs.length > 0) {
+          sourcedItemsXml = vmHrefs.map((href, i) => {
+            const cfg = resolvedVmConfigs[i] ?? resolvedVmConfigs[0] ?? {};
+            const fallbackName = vmHrefs.length === 1 ? vappName : `${vappName}-${i + 1}`;
+            return this.buildSourcedItemXml(href, cfg, fallbackName);
+          }).join('');
+        }
+      }
+
       const createVAppPayload = `<?xml version="1.0" encoding="UTF-8"?>
 <InstantiateVAppTemplateParams
     xmlns="http://www.vmware.com/vcloud/v1.5"
     name="${vappName}"
     deploy="false"
     powerOn="false">
-    <Description>Created by Zettagrid MCP Server</Description>
-    <Source href="${templateId}" />
+    <Description>Created by Zettagrid MCP Server</Description>${vappInstParamsXml}
+    <Source href="${templateId}" />${sourcedItemsXml}
+    <AllEULAsAccepted>true</AllEULAsAccepted>
 </InstantiateVAppTemplateParams>`;
 
       const response = await this.makeRequest<string>({
         method: 'POST',
         url: `/vdc/${vdcId}/action/instantiateVAppTemplate`,
         data: createVAppPayload,
-        headers: {
-          'Content-Type': 'application/vnd.vmware.vcloud.instantiateVAppTemplateParams+xml'
-        }
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.instantiateVAppTemplateParams+xml' }
       }, zoneId);
 
       // Response is the new VApp entity XML — extract key fields
@@ -940,11 +1204,14 @@ export class ZettagridClient {
       const taskHref = (vappXml.match(/<Task\b[^>]*href="([^"]+)"/) || [])[1] || '';
       const taskStatus = (vappXml.match(/<Task\b[^>]*status="([^"]+)"/) || [])[1] || '';
       return this.formatMcpResponse(
-        { vappId, vmId, vappName: resolvedName, vappHref, vmHref, task: { href: taskHref, status: taskStatus } },
-        zoneId || this.zoneManager.getConfig().defaultZone
+        { vappId, vmId, vappName: resolvedName, vappHref, vmHref,
+          task: { href: taskHref, status: taskStatus },
+          ...(autoConfigured ? { autoConfigured } : {})
+        },
+        zone
       );
     } catch (error) {
-      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({}, zone, {
         code: 'CREATE_VAPP_ERROR',
         message: error instanceof Error ? error.message : 'Failed to create vApp',
         details: error
@@ -1543,16 +1810,39 @@ export class ZettagridClient {
    */
   async listCatalogItems(catalogId?: string, zoneId?: string): Promise<McpToolResponse<ListResponse<Record<string, any>>>> {
     try {
-      const params: Record<string, string> = { type: 'catalogItem' };
-      if (catalogId) params.filter = `catalog==${catalogId}`;
-      const response = await this.makeRequest<string>({
-        method: 'GET',
-        url: '/query',
-        params
-      }, zoneId);
-      const records = parseQueryResults(response.data);
+      const PAGE_SIZE = 128;
+      const allRecords: Record<string, any>[] = [];
+      let page = 1;
+      let total = Infinity;
+
+      while (allRecords.length < total) {
+        const params: Record<string, string> = {
+          type: 'catalogItem',
+          pageSize: String(PAGE_SIZE),
+          page: String(page),
+        };
+        if (catalogId) params.filter = `catalog==${catalogId}`;
+
+        const response = await this.makeRequest<string>({ method: 'GET', url: '/query', params }, zoneId);
+        const xml = String(response.data);
+
+        // Extract total from root element attribute
+        if (total === Infinity) {
+          const totalMatch = xml.match(/\btotal="(\d+)"/);
+          total = totalMatch?.[1] ? parseInt(totalMatch[1], 10) : 0;
+          if (total === 0) break;
+        }
+
+        const records = parseQueryResults(xml);
+        if (!records.length) break;
+        allRecords.push(...records);
+
+        if (allRecords.length >= total) break;
+        page++;
+      }
+
       const listResponse: ListResponse<Record<string, any>> = {
-        items: records, total: records.length, page: 1, pageSize: records.length, hasMore: false
+        items: allRecords, total: allRecords.length, page: 1, pageSize: allRecords.length, hasMore: false
       };
       return this.formatMcpResponse(listResponse, zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -1951,6 +2241,60 @@ export class ZettagridClient {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'UPDATE_VM_MEMORY_ERROR',
         message: error instanceof Error ? error.message : 'Failed to update VM memory — ensure VM is powered off',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * Resize the boot disk of a VM (must be POWERED_OFF).
+   * Uses virtualHardwareSection/disks (RASD format) — modifies InstanceID 2000 capacity.
+   */
+  async updateVMDisk(vmId: string, diskSizeMB: number, zoneId?: string): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      const getResp = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vApp/vm-${vmId}/virtualHardwareSection/disks`
+      }, zoneId);
+      const xml = getResp.data as unknown as string;
+      // Scan individual <Item>...</Item> blocks to avoid cross-block regex spanning
+      const itemPattern = /<Item\b[\s\S]*?<\/Item>/g;
+      let diskItem: string | null = null;
+      let im: RegExpExecArray | null;
+      while ((im = itemPattern.exec(xml)) !== null) {
+        if (im[0].includes('<rasd:InstanceID>2000</rasd:InstanceID>')) {
+          diskItem = im[0];
+          break;
+        }
+      }
+      if (!diskItem) {
+        const ids = [...xml.matchAll(/<rasd:InstanceID>(\d+)<\/rasd:InstanceID>/g)].map(x => x[1]);
+        throw new Error(`Disk InstanceID 2000 not found. Present IDs: [${ids.join(', ')}]`);
+      }
+
+      // VirtualQuantity is in bytes; capacity attribute is in MB with a dynamic namespace prefix
+      const diskSizeBytes = diskSizeMB * 1024 * 1024;
+      const capacityPrefix = diskItem.match(/(\w+):capacity="\d+"/)?.[1] ?? 'ns10';
+      const updatedItem = diskItem
+        .replace(/\w+:capacity="\d+"/, `${capacityPrefix}:capacity="${diskSizeMB}"`)
+        .replace(/(<rasd:VirtualQuantity>)\d+(<\/rasd:VirtualQuantity>)/, `$1${diskSizeBytes}$2`);
+      const updated = xml.replace(diskItem, updatedItem);
+
+      const putResp = await this.makeRequest<string>({
+        method: 'PUT',
+        url: `/vApp/vm-${vmId}/virtualHardwareSection/disks`,
+        data: updated,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
+      }, zoneId);
+      return this.formatMcpResponse(
+        { ...parseTaskResponse(putResp.data), diskSizeMB },
+        zone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zone, {
+        code: 'UPDATE_VM_DISK_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to resize disk — ensure VM is powered off',
         details: error
       });
     }

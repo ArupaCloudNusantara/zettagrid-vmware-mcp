@@ -378,6 +378,81 @@ export interface ProviderNetworkInfo {
   availableIpCount?: number;
 }
 
+// InstantiateVAppTemplate param types
+
+/** vApp-level network fence config (bridged/isolated/natRouted) */
+export interface VAppNetworkConfig {
+  networkName: string;
+  parentNetworkHref?: string;
+  fenceMode: 'bridged' | 'isolated' | 'natRouted';
+}
+
+/** Per-VM NIC connection to an org VDC network */
+export interface VAppNetworkConnection {
+  networkName: string;
+  ipMode: 'DHCP' | 'POOL' | 'MANUAL' | 'NONE';
+  ipAddress?: string;
+  isPrimary?: boolean;
+  index?: number;
+}
+
+/** OVF ProductSection property — used for cloud-init on Ubuntu images */
+export interface VAppOvfProperty {
+  key: string;
+  value: string;
+}
+
+/** Guest customization (Windows / Linux that supports VCD guest tools) */
+export interface VAppGuestCustomization {
+  enabled?: boolean;
+  computerName?: string;
+  adminPasswordEnabled?: boolean;
+  adminPasswordAuto?: boolean;
+  adminPassword?: string;
+  resetPasswordRequired?: boolean;
+  customizationScript?: string;
+  changeSid?: boolean;
+}
+
+/** Per-VM configuration applied during template instantiation */
+export interface VAppVmConfig {
+  vmName?: string;
+  description?: string;
+  // Compute
+  cpuCount?: number;
+  coresPerSocket?: number;
+  memoryMB?: number;
+  // Storage
+  diskSizeMB?: number;
+  storageProfileHref?: string;
+  storageProfileName?: string;
+  // Network
+  networkConnections?: VAppNetworkConnection[];
+  // OVF properties (cloud-init for Ubuntu images)
+  ovfProperties?: VAppOvfProperty[];
+  // Guest customization (Windows)
+  guestCustomization?: VAppGuestCustomization;
+}
+
+/** @deprecated kept for backwards compatibility — use vmConfigs instead */
+export interface VAppCustomProperty {
+  key: string;
+  value: string;
+  type?: string;
+  userConfigurable?: boolean;
+}
+
+export interface VAppInstantiationParams {
+  /** vApp-level network fence configuration */
+  networkConfig?: VAppNetworkConfig[];
+  /** Per-VM configuration — index-aligned to VMs in the template */
+  vmConfigs?: VAppVmConfig[];
+  /** @deprecated use vmConfigs[0].guestCustomization */
+  guestCustomization?: VAppGuestCustomization;
+  /** @deprecated use vmConfigs[0].ovfProperties */
+  customProperties?: VAppCustomProperty[];
+}
+
 // vApp Types
 export interface VApp extends VCloudEntity {
   status?: number;
