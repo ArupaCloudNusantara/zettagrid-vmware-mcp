@@ -390,7 +390,8 @@ export interface VAppNetworkConfig {
 /** Per-VM NIC connection to an org VDC network */
 export interface VAppNetworkConnection {
   networkName: string;
-  ipMode: 'DHCP' | 'POOL' | 'MANUAL' | 'NONE';
+  /** Omit to auto-select: POOL when pool IPs are available, otherwise clarification is requested */
+  ipMode?: 'DHCP' | 'POOL' | 'MANUAL' | 'NONE';
   ipAddress?: string;
   isPrimary?: boolean;
   index?: number;
@@ -567,6 +568,12 @@ export interface FirewallRule {
   sourcePortRange?: string;
   sourceIp?: string;
   enableLogging?: boolean;
+  /** NSX-T CloudAPI: source firewall group/IP-set URNs */
+  sourceFirewallGroups?: string[];
+  /** NSX-T CloudAPI: destination firewall group/IP-set URNs */
+  destinationFirewallGroups?: string[];
+  /** NSX-T CloudAPI: application port profile URNs */
+  portProfiles?: string[];
 }
 
 export interface FirewallRuleProtocols {

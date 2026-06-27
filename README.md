@@ -1,7 +1,7 @@
 # Zettagrid VMware MCP Server
 
 > **Community fork** of [Zettagrid/zettagrid-vmware-mcp](https://github.com/Zettagrid/zettagrid-vmware-mcp) v1.0.0.  
-> Fork version: **v1.1.0** — 50 tools, Indonesia zones (Jakarta, Cibitung), full firewall/NAT CRUD, VM resize/reset, vApp delete/undeploy, task polling, Docker transport. All original Australian zones and tools are fully preserved.
+> Fork version: **v1.1.0** — 56 tools, Indonesia zones (Jakarta, Cibitung), full firewall/NAT CRUD, VM resize/network/disk/hostname, vApp delete/undeploy/add-vm, application port profiles, task polling, Docker transport. All original Australian zones and tools are fully preserved.
 
 A Model Context Protocol (MCP) server for managing VMware Cloud Director (VCD 10.5) infrastructure through AI assistants such as Claude. Covers the full tenant lifecycle: read, create, modify, delete across vApps, VMs, firewall, NAT, snapshots, and tasks.
 
@@ -96,6 +96,34 @@ PORT=3001
 }
 ```
 
+### Claude Code (stdio — recommended)
+
+Run once from the project directory. Tools load in the **next** session.
+
+```bash
+claude mcp add zettagrid \
+  -e ZETTAGRID_DEFAULT_ZONE=jakarta \
+  -e ZETTAGRID_API_VERSION=39.1 \
+  -e ZETTAGRID_API_TOKEN_JAKARTA=your-jakarta-token \
+  -e ZETTAGRID_OAUTH_ENDPOINT_JAKARTA=https://mycloud-jkt.zettagrid.id/oauth/tenant/YourOrgName/token \
+  -e ZETTAGRID_API_ENDPOINT_JAKARTA=https://mycloud-jkt.zettagrid.id/api \
+  -e ZETTAGRID_ORGANIZATION=YourOrgName \
+  -- node /absolute/path/to/zettagrid-vmware-mcp/build/index.js
+```
+
+Add `-e` flags for every zone you want active (see zone table above). Verify connectivity:
+
+```bash
+claude mcp list
+# zettagrid: node .../build/index.js - ✔ Connected
+```
+
+**Gotchas:**
+- Entrypoint must be `build/index.js` — not `build/server/mcp-server.js` (that file doesn't load dotenv and will fail silently)
+- OAuth URL must include the real org name — the `.env.example` ships with a `your-organization-name` placeholder; replace it
+- Registration is project-scoped; open Claude Code from this directory for tools to appear
+- Tools are only available after restarting Claude Code (not in the session where you ran `claude mcp add`)
+
 ### Claude Code (HTTP transport via Docker)
 
 ```json
@@ -121,7 +149,7 @@ curl http://localhost:3001/health
 
 ---
 
-## Tool Reference — 50 Tools
+## Tool Reference — 56 Tools
 
 ### Zone (3)
 
@@ -147,7 +175,7 @@ curl http://localhost:3001/health
 | `show_vdc_resources` | CPU, RAM, storage usage percentages |
 | `show_all_vdc_resources` | Resources across all VDCs (server aggregate) |
 
-### vApp (6)
+### vApp (8)
 
 | Tool | Description |
 |------|-------------|
@@ -156,10 +184,11 @@ curl http://localhost:3001/health
 | `power_on_vapp` | Power on a vApp |
 | `power_off_vapp` | Power off a vApp (hard) |
 | `create_vapp` | Deploy a vApp from a catalog template |
-| `delete_vapp` | Delete a vApp — automatically undeployes first if needed |
+| `delete_vapp` | Delete a vApp — automatically undeploys first if needed |
 | `undeploy_vapp` | Undeploy a vApp from ESXi hosts without deleting data |
+| `add_vm_to_vapp` | Add a VM from a template into an existing vApp |
 
-### VM (13)
+### VM (15)
 
 | Tool | Description |
 |------|-------------|
@@ -175,6 +204,9 @@ curl http://localhost:3001/health
 | `reset_vm` | Hard reset — for unresponsive VMs, no VMware Tools required |
 | `update_vm_cpu` | Change vCPU count — **VM must be powered off** |
 | `update_vm_memory` | Change RAM (MB) — **VM must be powered off** |
+| `update_vm_disk` | Resize the primary disk (MB) — **VM must be powered off** |
+| `update_vm_network` | Change NIC network, IP mode, or static IP — **VM must be powered off** |
+| `update_vm_computer_name` | Change the guest OS hostname stored in VCD — **VM must be powered off** |
 
 ### Snapshot (4)
 
@@ -192,6 +224,13 @@ curl http://localhost:3001/health
 | `list_disks` | List named independent disks |
 | `list_tasks` | List recent async tasks with status |
 | `get_task` | Poll a specific task by ID — enables AI async loops |
+
+### Application Port Profiles (2)
+
+| Tool | Description |
+|------|-------------|
+| `list_application_port_profiles` | List NSX-T application port profiles; filter by scope (SYSTEM, TENANT, ALL) |
+| `create_application_port_profile` | Create a custom port profile for use in firewall rules |
 
 ### Catalog (2)
 
@@ -221,8 +260,8 @@ curl http://localhost:3001/health
 | Tool | Description |
 |------|-------------|
 | `list_firewall_rules` | List all firewall rules including the default rule |
-| `create_firewall_rule` | Create a new firewall rule |
-| `update_firewall_rule` | Update an existing rule (name, policy, enabled, IPs) |
+| `create_firewall_rule` | Create a firewall rule; supports `sourceFirewallGroups`, `destinationFirewallGroups`, and `portProfiles` / `portProfileId` in a single call |
+| `update_firewall_rule` | Update an existing rule — same field support as create |
 | `delete_firewall_rule` | Delete a firewall rule by ID |
 
 ### NAT (3)
@@ -309,9 +348,11 @@ Three upstream tools had `// TODO` client implementations returning empty arrays
 
 Additionally: `parseVAppRecords` had a `parseInt("POWERED_ON") = NaN` bug (VCD query API returns string status for vApps, not integer). Fixed with `isNaN` fallback, matching the existing `parseVMRecords` pattern.
 
-### New tools (30 added, 50 total vs upstream 20)
+### New tools (36 added, 56 total vs upstream 20)
 
 **v1.1.0** (+30): `get_vm`, `shutdown_vm`, `reboot_vm`, `suspend_vm`, `reset_vm`, `get_vapp`, `power_on_vapp`, `power_off_vapp`, `create_vapp`, `delete_vapp`, `undeploy_vapp`, `update_vm_cpu`, `update_vm_memory`, `list_disks`, `list_tasks`, `get_task`, `list_org_networks`, `list_catalogs`, `list_catalog_items`, `list_snapshots`, `create_snapshot`, `revert_snapshot`, `remove_snapshots`, `get_zone_health`, `list_nat_rules`, `create_nat_rule`, `delete_nat_rule`, `update_firewall_rule`, `delete_firewall_rule`, `get_vm_metrics`
+
+**v1.1.0 follow-up** (+6): `add_vm_to_vapp`, `update_vm_disk`, `update_vm_network`, `update_vm_computer_name`, `list_application_port_profiles`, `create_application_port_profile`
 
 ### SDK upgrade
 
@@ -336,6 +377,9 @@ Relevant to anyone extending this server against VCD 10.5 / NSX-T:
 - **VM hardware XML namespace**: `PUT /virtualHardwareSection/cpu` and `/memory` require `xmlns="http://www.vmware.com/vcloud/v1.5"` as the root element namespace; VCD rejects the RASD namespace as root with "Cannot find declaration of element 'Item'"
 - **vApp status**: VCD query API returns string `"POWERED_ON"` (not integer) for vApp records; integer status is used in the detail API. `parseVAppRecords` handles both.
 - **VM settle time**: After a vApp instantiation task completes, wait ~5–8s before issuing power operations or they may fail silently
+- **vApp network naming during instantiation**: `NetworkAssignment` (remapping template NIC network → vApp network) is unreliable in VCD 10.5 — NIC overrides are silently ignored when the names differ. Workaround: name the vApp network the same as the template's internal NIC network (e.g. `"VM Network"`) and set `ParentNetwork` to the org network href. The `create_vapp` auto-populate path does this automatically.
+- **Application port profile `contextEntityId`**: must be in the JSON request body, not the query string. Also requires `orgRef: { id: "urn:vcloud:org:{uuid}" }` alongside it — VCD returns HTTP 400 if `orgRef` is absent when a VDC URN is used as `contextEntityId`.
+- **Firewall rule groups**: `sourceFirewallGroups` and `destinationFirewallGroups` are arrays of `{ id }` objects (URNs). `applicationPortProfiles` is also `{ id }` only — do not include `displayName` or VCD returns HTTP 400 "Unrecognized field".
 
 ---
 

@@ -128,11 +128,21 @@ export class ZettagridClient {
         });
       }
 
-      // Execute request with retry logic
-      const response = await this.executeWithRetry(
+      const doFetch = () => this.executeWithRetry(
         () => fetch(url.toString(), requestConfig),
         globalConfig.retryAttempts
       );
+
+      let response = await doFetch();
+
+      // On 401, the server-side session expired independently of the local token cache.
+      // Invalidate, re-authenticate, and retry once with fresh headers.
+      if (response.status === 401) {
+        await auth.logout();
+        const freshHeaders = await auth.getAuthenticatedHeaders();
+        requestConfig.headers = { ...freshHeaders, ...config.headers };
+        response = await doFetch();
+      }
 
       // Parse response
       const responseData = await this.parseResponse<T>(response);
@@ -278,7 +288,20 @@ export class ZettagridClient {
     };
     if (body !== undefined) requestInit.body = JSON.stringify(body);
 
-    const response = await fetch(url, requestInit);
+    let response = await fetch(url, requestInit);
+
+    // On 401, the server-side session expired — invalidate, re-auth, retry once.
+    if (response.status === 401) {
+      await auth.logout();
+      const freshHeaders = await auth.getAuthenticatedHeaders();
+      requestInit.headers = {
+        ...freshHeaders,
+        'Accept': `application/json;version=${zoneConfig.apiVersion}`,
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      };
+      response = await fetch(url, requestInit);
+    }
+
     if (!response.ok) {
       const errText = await response.text().catch(() => '');
       throw new Error(`CloudAPI ${method} ${path} → HTTP ${response.status}: ${errText.slice(0, 300)}`);
@@ -992,31 +1015,53 @@ export class ZettagridClient {
     }
   }
 
-  /** Fetch VM hrefs from a vAppTemplate — returns hrefs like /vAppTemplate/vm-UUID */
-  private async fetchTemplateVmHrefs(templateHref: string, zoneId?: string): Promise<string[]> {
+  /** Fetch VM hrefs and their existing NIC network names from a vAppTemplate.
+   *  Network names are needed to build NetworkAssignment elements that remap
+   *  template NICs to vApp networks (without this vCD ignores the NIC override). */
+  private async fetchTemplateVmHrefs(templateHref: string, zoneId?: string): Promise<{ href: string; templateNetworks: string[] }[]> {
     try {
-      // templateHref is an absolute URL; makeRequest expects a path relative to the /api base
       const pathMatch = templateHref.match(/\/api(\/.+)/);
       const relativePath = pathMatch?.[1] ?? templateHref;
       const response = await this.makeRequest<string>({ method: 'GET', url: relativePath }, zoneId);
       const xml = response.data as unknown as string;
-      const vmHrefs: string[] = [];
-      const re = /<Vm\b[^>]*\shref="([^"]+)"/g;
+
+      // Split template XML into per-VM blocks to pair hrefs with their NIC networks
+      const result: { href: string; templateNetworks: string[] }[] = [];
+      const vmBlockRe = /<Vm\b([^>]*)>([\s\S]*?)<\/Vm>/g;
       let m: RegExpExecArray | null;
-      while ((m = re.exec(xml)) !== null) {
-        const href = m[1];
-        if (href && !vmHrefs.includes(href)) vmHrefs.push(href);
+      while ((m = vmBlockRe.exec(xml)) !== null) {
+        const attrs = m[1] ?? '';
+        const body  = m[2] ?? '';
+        const hrefMatch = attrs.match(/href="([^"]+)"/);
+        if (!hrefMatch?.[1]) continue;
+        const href = hrefMatch[1];
+        // Extract unique NIC network names within this VM block
+        const networks: string[] = [];
+        const ncRe = /<NetworkConnection\b[^>]*\bnetwork="([^"]+)"/g;
+        let nm: RegExpExecArray | null;
+        while ((nm = ncRe.exec(body)) !== null) {
+          const net = nm[1];
+          if (net && !networks.includes(net)) networks.push(net);
+        }
+        if (!result.some(r => r.href === href)) result.push({ href, templateNetworks: networks });
       }
-      return vmHrefs;
+      return result;
     } catch {
       return [];
     }
   }
 
-  /** Build a complete SourcedItem XML block for one VM */
-  private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string): string {
+  /** Build a complete SourcedItem XML block for one VM.
+   *  templateNetworks: NIC network names the template VM already has (e.g. ["VM Network"]).
+   *  When provided, NetworkAssignment elements are added to remap template NICs to the
+   *  user-specified vApp networks — without these vCD silently ignores the NIC override. */
+  private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string, templateNetworks?: string[], networkNameMap?: Map<string, string>): string {
     const vmName = vmConfig.vmName ?? fallbackName;
     const instSections: string[] = [];
+
+    // Resolve computer name / hostname (priority: explicit gc.computerName → OVF hostname → vmName)
+    const hostnameFromOvf = vmConfig.ovfProperties?.find(p => p.key === 'hostname')?.value;
+    const resolvedComputerName = vmConfig.guestCustomization?.computerName || hostnameFromOvf || vmName;
 
     // Network connections
     if (vmConfig.networkConnections?.length) {
@@ -1024,12 +1069,14 @@ export class ZettagridClient {
       const primaryIdx = vmConfig.networkConnections.indexOf(primary);
       const nics = vmConfig.networkConnections.map((nc, i) => {
         const idx = nc.index ?? i;
-        const ipLine = nc.ipMode === 'MANUAL' && nc.ipAddress ? `<IpAddress>${nc.ipAddress}</IpAddress>` : '';
-        return `<NetworkConnection network="${nc.networkName}">
+        const resolvedMode = nc.ipMode ?? 'POOL';
+        const ipLine = resolvedMode === 'MANUAL' && nc.ipAddress ? `<IpAddress>${nc.ipAddress}</IpAddress>` : '';
+        const resolvedNetName = networkNameMap?.get(nc.networkName) ?? nc.networkName;
+        return `<NetworkConnection network="${resolvedNetName}">
                 <NetworkConnectionIndex>${idx}</NetworkConnectionIndex>
                 ${ipLine}
                 <IsConnected>true</IsConnected>
-                <IpAddressAllocationMode>${nc.ipMode}</IpAddressAllocationMode>
+                <IpAddressAllocationMode>${resolvedMode}</IpAddressAllocationMode>
             </NetworkConnection>`;
       }).join('\n            ');
       instSections.push(`<NetworkConnectionSection>
@@ -1039,9 +1086,14 @@ export class ZettagridClient {
         </NetworkConnectionSection>`);
     }
 
-    // OVF ProductSection (cloud-init for Ubuntu) — must be ovf:ProductSection directly, not wrapped in ProductSectionList
+    // OVF ProductSection (cloud-init for Ubuntu).
+    // Auto-inject hostname = resolvedComputerName when not explicitly provided by the caller.
     if (vmConfig.ovfProperties?.length) {
-      const props = vmConfig.ovfProperties.map(p =>
+      const hasHostname = vmConfig.ovfProperties.some(p => p.key === 'hostname');
+      const effectiveProps = hasHostname
+        ? vmConfig.ovfProperties
+        : [{ key: 'hostname', value: resolvedComputerName }, ...vmConfig.ovfProperties];
+      const props = effectiveProps.map(p =>
         `<ovf:Property ovf:key="${p.key}" ovf:type="string" ovf:value="${p.value}"/>`
       ).join('\n            ');
       instSections.push(`<ovf:ProductSection xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">
@@ -1050,21 +1102,20 @@ export class ZettagridClient {
         </ovf:ProductSection>`);
     }
 
-    // Guest customization — only for Windows/VCD-tools VMs where the caller explicitly
-    // provides guestCustomization. For Linux cloud-init VMs we leave this out; combined
-    // with NeedsCustomization:false below, VCD's open-vm-tools customization agent is
-    // suppressed entirely and cloud-init owns hostname + network configuration.
-    if (vmConfig.guestCustomization) {
-      const gc = vmConfig.guestCustomization;
+    // GuestCustomizationSection — always injected so ComputerName is stored in VCD.
+    // For Linux cloud-init VMs (no explicit guestCustomization), NeedsCustomization stays
+    // false so VCD's open-vm-tools agent is NOT triggered; the section is stored only.
+    {
+      const gc = vmConfig.guestCustomization ?? {};
       const fields = [
-        gc.enabled !== undefined             ? `<Enabled>${gc.enabled}</Enabled>` : '',
-        gc.changeSid !== undefined           ? `<ChangeSid>${gc.changeSid}</ChangeSid>` : '',
-        gc.adminPasswordEnabled !== undefined ? `<AdminPasswordEnabled>${gc.adminPasswordEnabled}</AdminPasswordEnabled>` : '',
-        gc.adminPasswordAuto !== undefined    ? `<AdminPasswordAuto>${gc.adminPasswordAuto}</AdminPasswordAuto>` : '',
-        gc.adminPassword                      ? `<AdminPassword>${gc.adminPassword}</AdminPassword>` : '',
+        gc.enabled !== undefined              ? `<Enabled>${gc.enabled}</Enabled>` : '',
+        gc.changeSid !== undefined            ? `<ChangeSid>${gc.changeSid}</ChangeSid>` : '',
+        gc.adminPasswordEnabled !== undefined  ? `<AdminPasswordEnabled>${gc.adminPasswordEnabled}</AdminPasswordEnabled>` : '',
+        gc.adminPasswordAuto !== undefined     ? `<AdminPasswordAuto>${gc.adminPasswordAuto}</AdminPasswordAuto>` : '',
+        gc.adminPassword                       ? `<AdminPassword>${gc.adminPassword}</AdminPassword>` : '',
         gc.resetPasswordRequired !== undefined ? `<ResetPasswordRequired>${gc.resetPasswordRequired}</ResetPasswordRequired>` : '',
-        gc.computerName                       ? `<ComputerName>${gc.computerName}</ComputerName>` : '',
-        gc.customizationScript                ? `<CustomizationScript>${gc.customizationScript}</CustomizationScript>` : '',
+        `<ComputerName>${resolvedComputerName}</ComputerName>`,
+        gc.customizationScript                 ? `<CustomizationScript>${gc.customizationScript}</CustomizationScript>` : '',
       ].filter(Boolean).join('\n            ');
       instSections.push(`<GuestCustomizationSection>
             <ovf:Info xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">Guest customization</ovf:Info>
@@ -1083,8 +1134,23 @@ export class ZettagridClient {
 
     // CPU/memory/disk cannot be set during instantiateVAppTemplate.
     // SourcedCompositionItemParam does not support VmSpecSection.
-    // ComputePolicy only accepts VmSizingPolicy/VmPlacementPolicy hrefs (named policies).
     // Resize CPU/memory/disk post-instantiation via PUT /vApp/vm-{id}/vmSpecSection.
+
+    // NetworkAssignment — maps the template VM's existing NIC networks to vApp networks.
+    // vCD uses these to connect the VM's NICs to the correct vApp network; without them
+    // the NetworkConnectionSection override in InstantiationParams is silently ignored
+    // and the VM falls back to the template's original network (e.g. "VM Network").
+    let networkAssignmentsXml = '';
+    // NetworkAssignment is only needed when vApp network names differ from template network
+    // names. When networkNameMap is populated we already use template names in both the vApp
+    // NetworkConfig and the NIC override, so no remapping is required.
+    if (templateNetworks?.length && vmConfig.networkConnections?.length && !(networkNameMap?.size)) {
+      const targetNames = vmConfig.networkConnections.map(nc => nc.networkName);
+      networkAssignmentsXml = templateNetworks.map((templateNet, i) => {
+        const innerNet = targetNames[i] ?? targetNames[0] ?? templateNet;
+        return `\n        <NetworkAssignment networkName="${templateNet}" innerNetwork="${innerNet}"/>`;
+      }).join('');
+    }
 
     return `
     <SourcedItem>
@@ -1092,7 +1158,7 @@ export class ZettagridClient {
         <VmGeneralParams>
             <Name>${vmName}</Name>
             <NeedsCustomization>${vmConfig.guestCustomization ? 'true' : 'false'}</NeedsCustomization>
-        </VmGeneralParams>${instParamsXml}${storageProfileXml}
+        </VmGeneralParams>${networkAssignmentsXml}${instParamsXml}${storageProfileXml}
     </SourcedItem>`;
   }
 
@@ -1113,7 +1179,13 @@ export class ZettagridClient {
             ? [{ guestCustomization: instantiationParams.guestCustomization }]
             : []);
 
-      // Auto-discover VDC networks when no VM has networkConnections specified
+      // Lazy-fetch VDC networks once; reused by both auto-discovery and IP-mode resolution
+      let cachedNets: Array<{ name: string; href: string; defaultGateway?: string; subnetPrefixLength?: number; availableIps: number; totalIps: number }> | undefined;
+      const getNets = async () => {
+        if (!cachedNets) cachedNets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
+        return cachedNets;
+      };
+
       let resolvedParams = instantiationParams;
       let autoConfigured: { network: string; ipMode: string } | undefined;
 
@@ -1121,7 +1193,7 @@ export class ZettagridClient {
         && effectiveVmConfigs.every(c => !c.networkConnections?.length);
 
       if (wantsNetworkDiscovery) {
-        const nets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
+        const nets = await getNets();
 
         if (nets.length > 1) {
           return this.formatMcpResponse(
@@ -1130,21 +1202,43 @@ export class ZettagridClient {
               availableNetworks: nets.map(n => ({
                 networkName: n.name,
                 availableIps: n.availableIps,
+                totalIps: n.totalIps,
                 gateway: n.defaultGateway,
                 prefix: n.subnetPrefixLength,
-                ipMode: 'POOL'
+                suggestedIpMode: n.availableIps > 0 ? 'POOL' : 'DHCP',
               }))
             },
             zone,
             {
               code: 'CLARIFICATION_REQUIRED',
-              message: `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + ipMode). Available options are in data.availableNetworks.`,
+              message: `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options are in data.availableNetworks.`,
             }
           );
         }
 
         if (nets.length === 1) {
           const net = nets[0]!;
+
+          if (net.availableIps <= 0) {
+            return this.formatMcpResponse(
+              {
+                needsClarification: true,
+                network: net.name,
+                poolStatus: { total: net.totalIps, available: 0 },
+                options: [
+                  { ipMode: 'MANUAL', note: 'Provide a specific static IP in the ipAddress field of networkConnections' },
+                  { ipMode: 'DHCP', note: 'Request an IP via DHCP (requires DHCP service enabled on the network)' },
+                ],
+                hint: 'Or expand the static IP pool in VDC network settings, then retry (ipMode will default to POOL).',
+              },
+              zone,
+              {
+                code: 'CLARIFICATION_REQUIRED',
+                message: `Network "${net.name}" has no available IPs in its static pool (pool size: ${net.totalIps}, all in use). Choose ipMode: MANUAL (with ipAddress) or DHCP, or expand the IP pool first.`,
+              }
+            );
+          }
+
           autoConfigured = { network: net.name, ipMode: 'POOL' };
           resolvedParams = {
             ...instantiationParams,
@@ -1160,20 +1254,118 @@ export class ZettagridClient {
         // 0 networks → proceed without network config
       }
 
-      const resolvedVmConfigs: VAppVmConfig[] = resolvedParams?.vmConfigs ?? effectiveVmConfigs;
+      let resolvedVmConfigs: VAppVmConfig[] = resolvedParams?.vmConfigs ?? effectiveVmConfigs;
+
+      // Resolve missing ipMode on user-provided networkConnections.
+      // Default to POOL when the network has available IPs; ask for clarification otherwise.
+      const hasUnresolvedIpMode = resolvedVmConfigs.some(c =>
+        c.networkConnections?.some(nc => !nc.ipMode)
+      );
+
+      if (hasUnresolvedIpMode) {
+        const nets = await getNets();
+        const netMap = new Map(nets.map(n => [n.name, n]));
+
+        const exhausted: Array<{ networkName: string; totalIps: number }> = [];
+
+        const finalVmConfigs = resolvedVmConfigs.map(c => ({
+          ...c,
+          networkConnections: c.networkConnections?.map(nc => {
+            if (nc.ipMode) return nc;
+            const info = netMap.get(nc.networkName);
+            if (info && info.availableIps > 0) {
+              return { ...nc, ipMode: 'POOL' as const };
+            }
+            exhausted.push({ networkName: nc.networkName, totalIps: info?.totalIps ?? 0 });
+            return nc;
+          })
+        }));
+
+        if (exhausted.length > 0) {
+          return this.formatMcpResponse(
+            {
+              needsClarification: true,
+              exhaustedNetworks: exhausted.map(e => ({
+                networkName: e.networkName,
+                poolStatus: { total: e.totalIps, available: 0 },
+                options: [
+                  { ipMode: 'MANUAL', note: 'Provide a specific static IP in the ipAddress field' },
+                  { ipMode: 'DHCP', note: 'Request an IP via DHCP' },
+                ],
+              })),
+              hint: 'Specify ipMode (MANUAL with ipAddress, or DHCP) for each affected NIC, or expand the static IP pool in VDC network settings and retry.',
+            },
+            zone,
+            {
+              code: 'CLARIFICATION_REQUIRED',
+              message: `${exhausted.length} NIC(s) have no available IPs in their static pool: ${exhausted.map(e => `"${e.networkName}"`).join(', ')}. Specify ipMode: MANUAL (with ipAddress) or DHCP, or expand the IP pool first.`,
+            }
+          );
+        }
+
+        resolvedParams = { ...resolvedParams, vmConfigs: finalVmConfigs };
+        resolvedVmConfigs = finalVmConfigs;
+      }
+
+      // Fetch template VM hrefs (and their NIC network names) early so we can use the
+      // template's internal network name ("VM Network") directly in the vApp NetworkConfig
+      // and NIC override — eliminating the need for NetworkAssignment.
+      let templateVms: { href: string; templateNetworks: string[] }[] = [];
+      if (resolvedVmConfigs.length > 0) {
+        templateVms = await this.fetchTemplateVmHrefs(templateId, zoneId);
+      }
+
+      // Build map: user-specified org network name → template VM NIC network name.
+      // When populated, the vApp network is named like the template (e.g. "VM Network")
+      // and is bridged to the org network — the VM's NIC already matches so no
+      // NetworkAssignment element is needed.
+      const networkNameMap = new Map<string, string>();
+      const firstVmTemplateNets = templateVms[0]?.templateNetworks ?? [];
+      if (firstVmTemplateNets.length > 0) {
+        resolvedVmConfigs.forEach(cfg => {
+          cfg.networkConnections?.forEach((nc, i) => {
+            const templateNet = firstVmTemplateNets[i] ?? firstVmTemplateNets[0]!;
+            if (templateNet && templateNet !== nc.networkName) {
+              networkNameMap.set(nc.networkName, templateNet);
+            }
+          });
+        });
+      }
+
+      // Auto-populate vApp-level networkConfig when user supplied networkConnections but no
+      // networkConfig. Use the template's internal network name as the vApp network name so
+      // the VM's NIC matches without NetworkAssignment.
+      if (!resolvedParams?.networkConfig?.length) {
+        const neededNames = new Set<string>();
+        resolvedVmConfigs.forEach(c => c.networkConnections?.forEach(nc => neededNames.add(nc.networkName)));
+        if (neededNames.size > 0) {
+          const nets = await getNets();
+          const netMap = new Map(nets.map(n => [n.name, n]));
+          const autoNetConfig = [...neededNames]
+            .map(name => {
+              const n = netMap.get(name);
+              if (!n) return null;
+              // Use template network name as vApp network name to avoid NetworkAssignment
+              const vappNetName = networkNameMap.get(name) ?? name;
+              return { networkName: vappNetName, parentNetworkHref: n.href, fenceMode: 'bridged' as const };
+            })
+            .filter((n): n is NonNullable<typeof n> => n !== null);
+          if (autoNetConfig.length > 0) {
+            resolvedParams = { ...resolvedParams, networkConfig: autoNetConfig };
+          }
+        }
+      }
+
       const vappInstParamsXml = this.buildVAppInstantiationParamsXml(resolvedParams);
 
       // Build SourcedItem blocks — one per VM in the template
       let sourcedItemsXml = '';
-      if (resolvedVmConfigs.length > 0) {
-        const vmHrefs = await this.fetchTemplateVmHrefs(templateId, zoneId);
-        if (vmHrefs.length > 0) {
-          sourcedItemsXml = vmHrefs.map((href, i) => {
-            const cfg = resolvedVmConfigs[i] ?? resolvedVmConfigs[0] ?? {};
-            const fallbackName = vmHrefs.length === 1 ? vappName : `${vappName}-${i + 1}`;
-            return this.buildSourcedItemXml(href, cfg, fallbackName);
-          }).join('');
-        }
+      if (templateVms.length > 0 && resolvedVmConfigs.length > 0) {
+        sourcedItemsXml = templateVms.map(({ href, templateNetworks }, i) => {
+          const cfg = resolvedVmConfigs[i] ?? resolvedVmConfigs[0] ?? {};
+          const fallbackName = templateVms.length === 1 ? vappName : `${vappName}-${i + 1}`;
+          return this.buildSourcedItemXml(href, cfg, fallbackName, templateNetworks, networkNameMap);
+        }).join('');
       }
 
       const createVAppPayload = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1220,45 +1412,107 @@ export class ZettagridClient {
   }
 
   /**
-   * Create a simple VM within an existing vApp
+   * Add a VM from a catalog template into an existing vApp via RecomposeVAppParams.
+   * Supports the same per-VM config as createVApp (network, OVF properties, guest customization).
+   * When ipMode is omitted and vdcId is supplied, pool availability is checked and
+   * CLARIFICATION_REQUIRED is returned if the pool is exhausted. Without vdcId, POOL is assumed.
+   * Compute overrides (cpuCount, memoryMB, diskSizeMB) in vmConfig are not applied during
+   * instantiation — use update_vm_cpu / update_vm_memory / update_vm_disk afterward.
    */
-  async createVM(vappId: string, vmName: string, zoneId?: string): Promise<McpToolResponse<any>> {
+  async addVMToVApp(
+    vappId: string,
+    templateId: string,
+    vmName: string,
+    vmConfig?: VAppVmConfig,
+    vdcId?: string,
+    zoneId?: string
+  ): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      // Simple VM creation payload
-      const createVMPayload = `<?xml version="1.0" encoding="UTF-8"?>
-<RecomposeVAppParams
-    xmlns="http://www.vmware.com/vcloud/v1.5"
-    name="${vmName}">
-    <Description>VM created by Zettagrid MCP Server</Description>
-    <SourcedItem>
-        <Source name="${vmName}"/>
-        <InstantiationParams>
-            <NetworkConnectionSection>
-                <ovf:Info xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">Network configuration</ovf:Info>
-            </NetworkConnectionSection>
-            <GuestCustomizationSection>
-                <ovf:Info xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">Guest customization</ovf:Info>
-                <Enabled>true</Enabled>
-                <ComputerName>${vmName}</ComputerName>
-            </GuestCustomizationSection>
-        </InstantiationParams>
-    </SourcedItem>
+      // Resolve the first VM href from the template
+      const templateVms = await this.fetchTemplateVmHrefs(templateId, zoneId);
+      if (!templateVms.length) {
+        throw new Error('No VMs found in template — verify templateId is a valid vAppTemplate href');
+      }
+      const vmHrefs = templateVms;
+
+      let finalVmConfig: VAppVmConfig = { ...vmConfig, vmName };
+
+      // Resolve missing ipMode on network connections
+      const hasUnresolvedIpMode = finalVmConfig.networkConnections?.some(nc => !nc.ipMode);
+      if (hasUnresolvedIpMode) {
+        if (vdcId) {
+          const nets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
+          const netMap = new Map(nets.map(n => [n.name, n]));
+          const exhausted: Array<{ networkName: string; totalIps: number }> = [];
+
+          const resolvedNics = finalVmConfig.networkConnections!.map(nc => {
+            if (nc.ipMode) return nc;
+            const info = netMap.get(nc.networkName);
+            if (info && info.availableIps > 0) return { ...nc, ipMode: 'POOL' as const };
+            exhausted.push({ networkName: nc.networkName, totalIps: info?.totalIps ?? 0 });
+            return nc;
+          });
+
+          if (exhausted.length > 0) {
+            return this.formatMcpResponse(
+              {
+                needsClarification: true,
+                exhaustedNetworks: exhausted.map(e => ({
+                  networkName: e.networkName,
+                  poolStatus: { total: e.totalIps, available: 0 },
+                  options: [
+                    { ipMode: 'MANUAL', note: 'Provide a specific static IP in the ipAddress field' },
+                    { ipMode: 'DHCP', note: 'Request an IP via DHCP' },
+                  ],
+                })),
+                hint: 'Specify ipMode (MANUAL with ipAddress, or DHCP), or expand the static IP pool in VDC network settings and retry.',
+              },
+              zone,
+              {
+                code: 'CLARIFICATION_REQUIRED',
+                message: `${exhausted.length} NIC(s) have no available IPs in their static pool: ${exhausted.map(e => `"${e.networkName}"`).join(', ')}. Specify ipMode: MANUAL (with ipAddress) or DHCP, or expand the pool first.`,
+              }
+            );
+          }
+
+          finalVmConfig = { ...finalVmConfig, networkConnections: resolvedNics };
+        } else {
+          // No vdcId — default unresolved NICs to POOL
+          finalVmConfig = {
+            ...finalVmConfig,
+            networkConnections: finalVmConfig.networkConnections?.map(nc =>
+              nc.ipMode ? nc : { ...nc, ipMode: 'POOL' as const }
+            ),
+          };
+        }
+      }
+
+      const { href: firstHref, templateNetworks: firstTemplateNetworks } = vmHrefs[0]!;
+      const sourcedItemXml = this.buildSourcedItemXml(firstHref, finalVmConfig, vmName, firstTemplateNetworks);
+
+      // name attribute is intentionally omitted — avoids renaming the parent vApp
+      const payload = `<?xml version="1.0" encoding="UTF-8"?>
+<RecomposeVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">
+    <Description>VM added by Zettagrid MCP Server</Description>${sourcedItemXml}
 </RecomposeVAppParams>`;
 
-      const response = await this.makeRequest({
+      const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/${vappId}/action/recomposeVApp`,
-        data: createVMPayload,
-        headers: {
-          'Content-Type': 'application/vnd.vmware.vcloud.recomposeVAppParams+xml'
-        }
+        url: `/vApp/vapp-${vappId}/action/recomposeVApp`,
+        data: payload,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.recomposeVAppParams+xml' }
       }, zoneId);
 
-      return this.formatMcpResponse(response.data, zoneId || this.zoneManager.getConfig().defaultZone);
+      const task = parseTaskResponse(response.data as unknown as string);
+      return this.formatMcpResponse(
+        { ...task, vappId, vmName, message: 'VM add task queued. Use get_task to poll for completion, then list_vms to find the new VM ID.' },
+        zone
+      );
     } catch (error) {
-      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
-        code: 'CREATE_VM_ERROR',
-        message: error instanceof Error ? error.message : 'Failed to create VM',
+      return this.formatMcpResponse({}, zone, {
+        code: 'ADD_VM_TO_VAPP_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to add VM to vApp',
         details: error
       });
     }
@@ -1448,18 +1702,18 @@ export class ZettagridClient {
   ): Promise<McpToolResponse<any>> {
     try {
       edgeGatewayId = toGatewayUrn(edgeGatewayId);
-      const portProfiles = (firewallRule as any).portProfiles as string[] | undefined;
+      const portProfiles = firewallRule.portProfiles ?? (firewallRule as any).portProfiles as string[] | undefined;
+      const portProfileId = (firewallRule as any).portProfileId as string | undefined;
+      const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId ? [portProfileId] : [])];
       const payload: Record<string, any> = {
         name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
         enabled: firewallRule.isEnabled !== false,
         action: firewallRule.policy === 'allow' ? 'ALLOW' : 'DROP',
         ipProtocol: 'IPV4_IPV6',
         direction: 'IN_OUT',
-        sourceFirewallGroups: [],
-        destinationFirewallGroups: [],
-        applicationPortProfiles: portProfiles?.length
-          ? portProfiles.map(p => ({ id: p, displayName: p.split(':').pop() || p }))
-          : [],
+        sourceFirewallGroups: (firewallRule.sourceFirewallGroups ?? []).map(id => ({ id })),
+        destinationFirewallGroups: (firewallRule.destinationFirewallGroups ?? []).map(id => ({ id })),
+        applicationPortProfiles: allPortProfiles.map(p => ({ id: p })),
         description: firewallRule.description || '',
         logging: firewallRule.enableLogging || false,
       };
@@ -2003,7 +2257,9 @@ export class ZettagridClient {
   ): Promise<McpToolResponse<any>> {
     try {
       const gwUrn = toGatewayUrn(edgeGatewayId);
-      const portProfiles = (firewallRule as any).portProfiles as string[] | undefined;
+      const portProfiles = firewallRule.portProfiles ?? (firewallRule as any).portProfiles as string[] | undefined;
+      const portProfileId = (firewallRule as any).portProfileId as string | undefined;
+      const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId ? [portProfileId] : [])];
       const payload: Record<string, any> = {
         id: ruleId,
         name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
@@ -2011,11 +2267,9 @@ export class ZettagridClient {
         action: firewallRule.policy === 'allow' ? 'ALLOW' : ((firewallRule.policy as string) === 'reject' ? 'REJECT' : 'DROP'),
         ipProtocol: 'IPV4_IPV6',
         direction: 'IN_OUT',
-        sourceFirewallGroups: [],
-        destinationFirewallGroups: [],
-        applicationPortProfiles: portProfiles?.length
-          ? portProfiles.map(p => ({ id: p, displayName: p.split(':').pop() || p }))
-          : [],
+        sourceFirewallGroups: (firewallRule.sourceFirewallGroups ?? []).map(id => ({ id })),
+        destinationFirewallGroups: (firewallRule.destinationFirewallGroups ?? []).map(id => ({ id })),
+        applicationPortProfiles: allPortProfiles.map(p => ({ id: p })),
         description: firewallRule.description || '',
         logging: firewallRule.enableLogging || false,
       };
@@ -2106,7 +2360,7 @@ export class ZettagridClient {
       if (natRule.applicationPortProfileId) {
         payload.applicationPortProfile = {
           id: natRule.applicationPortProfileId,
-          displayName: natRule.applicationPortProfileName || natRule.applicationPortProfileId.split(':').pop() || '',
+          name: natRule.applicationPortProfileName || natRule.applicationPortProfileId.split(':').pop() || '',
         };
       }
       const data = await this.makeCloudApiRequest<any>(
@@ -2353,6 +2607,195 @@ export class ZettagridClient {
         code: 'DELETE_VAPP_ERROR',
         message: error instanceof Error ? error.message : 'Failed to delete vApp',
         details: error
+      });
+    }
+  }
+
+  /**
+   * Update a VM NIC's network connection properties (network, IP mode, IP address, primary flag).
+   * Works on running or powered-off VMs. Fetches the current NetworkConnectionSection, patches the
+   * target NIC by index, and PUTs the section back.
+   */
+  async updateVMNetwork(
+    vmId: string,
+    update: {
+      nicIndex?: number;
+      networkName?: string;
+      ipMode?: 'DHCP' | 'POOL' | 'MANUAL' | 'NONE';
+      ipAddress?: string;
+      isPrimary?: boolean;
+    },
+    zoneId?: string
+  ): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      const getResp = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vApp/vm-${vmId}/networkConnectionSection`
+      }, zoneId);
+
+      let xml = getResp.data as unknown as string;
+      const nicIndex = update.nicIndex ?? 0;
+
+      // Extract all <NetworkConnection>...</NetworkConnection> blocks
+      const ncPattern = /(<NetworkConnection\b[^>]*>[\s\S]*?<\/NetworkConnection>)/g;
+      let m: RegExpExecArray | null;
+      const allNcs: string[] = [];
+      let targetNc: string | null = null;
+      while ((m = ncPattern.exec(xml)) !== null) {
+        const block = m[1] ?? '';
+        if (!block) continue;
+        allNcs.push(block);
+        const idxMatch = block.match(/<NetworkConnectionIndex>(\d+)<\/NetworkConnectionIndex>/);
+        if (idxMatch && idxMatch[1] !== undefined && parseInt(idxMatch[1], 10) === nicIndex) {
+          targetNc = block;
+        }
+      }
+
+      if (!targetNc) {
+        const found = allNcs
+          .map(n => n.match(/<NetworkConnectionIndex>(\d+)<\/NetworkConnectionIndex>/)?.[1])
+          .filter(Boolean)
+          .join(', ');
+        throw new Error(`NIC index ${nicIndex} not found. Available NIC indices: [${found}]`);
+      }
+
+      let updatedNc = targetNc;
+
+      if (update.networkName) {
+        updatedNc = updatedNc.replace(
+          /(<NetworkConnection\b[^>]*\bnetwork=")[^"]*(")/,
+          `$1${update.networkName}$2`
+        );
+      }
+
+      if (update.ipMode) {
+        updatedNc = updatedNc.replace(
+          /<IpAddressAllocationMode>[^<]*<\/IpAddressAllocationMode>/,
+          `<IpAddressAllocationMode>${update.ipMode}</IpAddressAllocationMode>`
+        );
+        if (update.ipMode !== 'MANUAL') {
+          updatedNc = updatedNc.replace(/<IpAddress>[^<]*<\/IpAddress>\s*/g, '');
+        }
+      }
+
+      if (update.ipAddress) {
+        if (updatedNc.includes('<IpAddress>')) {
+          updatedNc = updatedNc.replace(/<IpAddress>[^<]*<\/IpAddress>/, `<IpAddress>${update.ipAddress}</IpAddress>`);
+        } else {
+          updatedNc = updatedNc.replace('<IsConnected>', `<IpAddress>${update.ipAddress}</IpAddress>\n                <IsConnected>`);
+        }
+      }
+
+      xml = xml.replace(targetNc, updatedNc);
+
+      if (update.isPrimary) {
+        xml = xml.replace(
+          /<PrimaryNetworkConnectionIndex>\d+<\/PrimaryNetworkConnectionIndex>/,
+          `<PrimaryNetworkConnectionIndex>${nicIndex}</PrimaryNetworkConnectionIndex>`
+        );
+      }
+
+      const putResp = await this.makeRequest<string>({
+        method: 'PUT',
+        url: `/vApp/vm-${vmId}/networkConnectionSection`,
+        data: xml,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.networkConnectionSection+xml' }
+      }, zoneId);
+
+      return this.formatMcpResponse(
+        {
+          ...parseTaskResponse(putResp.data as unknown as string),
+          vmId,
+          nicIndex,
+          updated: {
+            networkName: update.networkName,
+            ipMode: update.ipMode,
+            ipAddress: update.ipAddress,
+            isPrimary: update.isPrimary,
+          },
+        },
+        zone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zone, {
+        code: 'UPDATE_VM_NETWORK_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to update VM network',
+        details: error
+      });
+    }
+  }
+
+  /**
+   * List application port profiles (system + tenant scope).
+   * filter: 'ALL' | 'SYSTEM' | 'TENANT' (default ALL)
+   */
+  async listApplicationPortProfiles(filter?: string, zoneId?: string): Promise<McpToolResponse<ListResponse<any>>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      const scope = filter?.toUpperCase() ?? 'ALL';
+      const filterParam = scope === 'ALL' ? '' : `?filter=scope==${scope}`;
+      const data = await this.makeCloudApiRequest<any>('GET', `/applicationPortProfiles${filterParam}`, zoneId);
+      const items: any[] = Array.isArray(data) ? data : (data.values ?? data.resultTotal !== undefined ? data.values ?? [] : []);
+      return this.formatMcpResponse(
+        { items, total: data.resultTotal ?? items.length, page: 1, pageSize: items.length, hasMore: false } as ListResponse<any>,
+        zone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({} as ListResponse<any>, zone, {
+        code: 'LIST_APP_PORT_PROFILES_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to list application port profiles',
+        details: error,
+      });
+    }
+  }
+
+  /**
+   * Create a custom application port profile scoped to the tenant org.
+   * contextEntityId is passed as-is — caller supplies the exact URN vCD requires.
+   * orgRef is resolved automatically from the org query API.
+   * ports: array of { protocol: 'TCP'|'UDP'|'ICMPv4'|'ICMPv6', destinationPorts: string[] }
+   */
+  async createApplicationPortProfile(
+    name: string,
+    contextEntityId: string,
+    ports: Array<{ protocol: string; destinationPorts: string[] }>,
+    zoneId?: string
+  ): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      // Resolve org URN for orgRef — required by vCD alongside contextEntityId
+      const orgListResp = await this.makeRequest<string>(
+        { method: 'GET', url: '/query', params: { type: 'organization' } },
+        zoneId
+      );
+      const orgs = parseOrganizationRecords(orgListResp.data);
+      const rawOrgId = orgs[0]?.id || '';
+      const orgUrn = rawOrgId.startsWith('urn:vcloud:org:') ? rawOrgId : `urn:vcloud:org:${rawOrgId}`;
+      if (!rawOrgId) throw new Error('Could not resolve org URN for orgRef — listOrganizations returned no results');
+
+      const payload = {
+        name,
+        scope: 'TENANT',
+        contextEntityId,
+        orgRef: { id: orgUrn },
+        applicationPorts: ports.map(p => ({
+          protocol: p.protocol.toUpperCase(),
+          destinationPorts: p.destinationPorts,
+        })),
+      };
+      const data = await this.makeCloudApiRequest<any>(
+        'POST',
+        '/applicationPortProfiles',
+        zoneId,
+        payload
+      );
+      return this.formatMcpResponse(data, zone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zone, {
+        code: 'CREATE_APP_PORT_PROFILE_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to create application port profile',
+        details: error,
       });
     }
   }
