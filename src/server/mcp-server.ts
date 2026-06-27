@@ -462,6 +462,20 @@ export class ZettagridMcpServer {
                 items: { type: 'string' },
                 description: 'Application port profile URNs to match (e.g. "urn:vcloud:applicationPortProfile:xxx"). Leave empty to match any application/port.'
               },
+              portProfileId: {
+                type: 'string',
+                description: 'Single application port profile URN (alternative to portProfiles array)'
+              },
+              sourceFirewallGroups: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Source firewall group URNs (IP sets, security groups). Omit for Any.'
+              },
+              destinationFirewallGroups: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Destination firewall group URNs (IP sets, security groups). Omit for Any.'
+              },
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
@@ -543,6 +557,9 @@ export class ZettagridMcpServer {
               sourceIp: { type: 'string', description: 'Source IP or CIDR (omit or "Any" for any)' },
               destinationIp: { type: 'string', description: 'Destination IP or CIDR (omit or "Any" for any)' },
               portProfiles: { type: 'array', items: { type: 'string' }, description: 'Application port profile URNs' },
+              portProfileId: { type: 'string', description: 'Single application port profile URN (alternative to portProfiles array)' },
+              sourceFirewallGroups: { type: 'array', items: { type: 'string' }, description: 'Source firewall group URNs (IP sets, security groups). Omit for Any.' },
+              destinationFirewallGroups: { type: 'array', items: { type: 'string' }, description: 'Destination firewall group URNs (IP sets, security groups). Omit for Any.' },
               enableLogging: { type: 'boolean', description: 'Enable traffic logging' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
@@ -564,7 +581,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_nat_rule',
-          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP.',
+          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP. For DNAT: set firewallMatch to MATCH_EXTERNAL_ADDRESS (recommended — matches traffic on the external/public port before NAT; the default MATCH_INTERNAL_ADDRESS matches after NAT and typically mismatches firewall rules keyed on the external port). The applicationPortProfileId defines the internal destination protocol/port; dnatExternalPort overrides the incoming external port.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -612,7 +629,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_cpu',
-          description: 'Update the vCPU count of a VM. VM must be powered off first.',
+          description: 'Update the vCPU count of a VM. VM must be powered off. SEQUENTIAL ONLY: vCD rejects concurrent updates to the same VM — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -626,7 +643,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_memory',
-          description: 'Update the RAM of a VM in megabytes. VM must be powered off first.',
+          description: 'Update the RAM of a VM. VM must be powered off. Parameter is "memoryMB" (NOT memorySizeMB). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_disk task to complete first.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -639,7 +656,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_disk',
-          description: 'Resize the boot disk (DiskId 2000) of a VM. VM must be powered off. Disk size can only be increased, not decreased.',
+          description: 'Resize the boot disk of a VM. VM must be powered off. Size can only be increased, not decreased. SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_memory task to complete first.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -813,21 +830,21 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_vapp',
-          description: 'Deploy a new vApp from a catalog template. Auto-discovers VDC networks: if vmConfigs omit networkConnections and only one routed network exists it is used automatically (POOL mode); if multiple networks exist the tool returns CLARIFICATION_REQUIRED with the list — ask the user which network to use before retrying. Use list_org_networks to inspect available networks beforehand.',
+          description: 'Deploy a new vApp from a catalog template. IMPORTANT: All VM configuration (name, network, OVF properties) must go inside instantiationParams.vmConfigs — top-level vmConfigs/ovfProperties are silently ignored. CPU/memory/disk are NOT applied during instantiation (vCD limitation) — use update_vm_cpu/update_vm_memory/update_vm_disk afterward (sequentially, waiting for each task). Typical workflow: create_vapp → get_task until success → update_vm_disk → get_task → update_vm_memory → get_task → power_on_vapp. Network auto-discovery: if vmConfigs omit networkConnections and only one routed network exists it is used automatically (POOL mode); if multiple networks exist returns CLARIFICATION_REQUIRED — call list_org_networks first.',
           inputSchema: {
             type: 'object',
             properties: {
-              vdcId: { type: 'string', description: 'Target VDC ID' },
-              templateId: { type: 'string', description: 'Catalog template href/ID (from list_catalog_items)' },
+              vdcId: { type: 'string', description: 'Target VDC ID (UUID from list_vdcs)' },
+              templateId: { type: 'string', description: 'Full catalog template href (e.g. "https://mycloud-jkt.zettagrid.id/api/vAppTemplate/vappTemplate-{uuid}") from list_catalog_items' },
               vappName: { type: 'string', description: 'Name for the new vApp' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] },
               instantiationParams: {
                 type: 'object',
-                description: 'Optional instantiation parameters for the vApp and its VMs',
+                description: 'VM and network configuration. ALL per-VM config must go here — do NOT pass vmConfigs or ovfProperties at the top level.',
                 properties: {
                   networkConfig: {
                     type: 'array',
-                    description: 'vApp-level network fence configuration',
+                    description: 'vApp-level network fence configuration (usually auto-populated from vmConfigs.networkConnections — only specify manually for advanced topologies)',
                     items: {
                       type: 'object',
                       properties: {
@@ -840,16 +857,16 @@ export class ZettagridMcpServer {
                   },
                   vmConfigs: {
                     type: 'array',
-                    description: 'Per-VM configuration (one entry per VM in the template). Supports compute, storage, network, and OVF cloud-init properties.',
+                    description: 'Per-VM configuration (one entry per VM in the template). NOTE: cpuCount/memoryMB/diskSizeMB are recorded but NOT applied by vCD during instantiation — the VM gets template defaults. Resize with update_vm_cpu/update_vm_memory/update_vm_disk after creation (run sequentially, not in parallel).',
                     items: {
                       type: 'object',
                       properties: {
-                        vmName: { type: 'string', description: 'VM display name (overrides template default)' },
+                        vmName: { type: 'string', description: 'VM display name — use "vmName" NOT "name" (common mistake). Overrides template default.' },
                         description: { type: 'string', description: 'VM description' },
-                        cpuCount: { type: 'number', description: 'Number of vCPUs' },
+                        cpuCount: { type: 'number', description: 'vCPU count — use "cpuCount" NOT "cpus". Applied post-instantiation via update_vm_cpu.' },
                         coresPerSocket: { type: 'number', description: 'CPU cores per socket' },
-                        memoryMB: { type: 'number', description: 'RAM in MB' },
-                        diskSizeMB: { type: 'number', description: 'Boot disk size in MB' },
+                        memoryMB: { type: 'number', description: 'RAM in MB — use "memoryMB" NOT "memorySizeMB". Applied post-instantiation via update_vm_memory.' },
+                        diskSizeMB: { type: 'number', description: 'Boot disk size in MB — applied post-instantiation via update_vm_disk.' },
                         storageProfileHref: { type: 'string', description: 'Storage policy href' },
                         storageProfileName: { type: 'string', description: 'Storage policy name' },
                         networkConnections: {
@@ -859,12 +876,12 @@ export class ZettagridMcpServer {
                             type: 'object',
                             properties: {
                               networkName: { type: 'string', description: 'Org VDC network name to connect to' },
-                              ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode' },
+                              ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode. Omit to auto-select: defaults to POOL when pool IPs are available, otherwise clarification is requested.' },
                               ipAddress: { type: 'string', description: 'Static IP (required when ipMode=MANUAL)' },
                               isPrimary: { type: 'boolean', description: 'Set as primary NIC (default: first NIC)' },
                               index: { type: 'number', description: 'NIC index (default: array position)' }
                             },
-                            required: ['networkName', 'ipMode']
+                            required: ['networkName']
                           }
                         },
                         ovfProperties: {
@@ -1017,6 +1034,123 @@ export class ZettagridMcpServer {
             type: 'object',
             properties: {}
           }
+        },
+        {
+          name: 'add_vm_to_vapp',
+          description: 'Add a VM from a catalog template into an existing vApp. The vApp must already exist (use create_vapp or list_vapps to find it). Network ipMode defaults to POOL when pool IPs are available; if pool is exhausted and vdcId is provided, clarification is requested. Compute overrides (CPU, memory, disk) are not applied during instantiation — use update_vm_cpu / update_vm_memory / update_vm_disk on the new VM afterward.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vappId: { type: 'string', description: 'Existing vApp UUID (from list_vapps or create_vapp)' },
+              templateId: { type: 'string', description: 'Catalog template href (from list_catalog_items)' },
+              vmName: { type: 'string', description: 'Name for the new VM' },
+              vdcId: { type: 'string', description: 'VDC UUID (optional but recommended — enables static IP pool availability checking)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] },
+              networkConnections: {
+                type: 'array',
+                description: 'NIC connections to org VDC networks. Omit ipMode to auto-select POOL when IPs are available.',
+                items: {
+                  type: 'object',
+                  properties: {
+                    networkName: { type: 'string', description: 'Org VDC network name' },
+                    ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode (omit to auto-select)' },
+                    ipAddress: { type: 'string', description: 'Static IP (required when ipMode=MANUAL)' },
+                    isPrimary: { type: 'boolean', description: 'Set as primary NIC' },
+                    index: { type: 'number', description: 'NIC index (default: array position)' }
+                  },
+                  required: ['networkName']
+                }
+              },
+              ovfProperties: {
+                type: 'array',
+                description: 'OVF ProductSection properties for cloud-init (Ubuntu). Keys: hostname, instance-id, password, public-keys, user-data (base64)',
+                items: {
+                  type: 'object',
+                  properties: {
+                    key: { type: 'string' },
+                    value: { type: 'string' }
+                  },
+                  required: ['key', 'value']
+                }
+              },
+              guestCustomization: {
+                type: 'object',
+                description: 'Guest OS customization (Windows VMs / VCD guest tools)',
+                properties: {
+                  enabled: { type: 'boolean' },
+                  computerName: { type: 'string' },
+                  adminPasswordEnabled: { type: 'boolean' },
+                  adminPasswordAuto: { type: 'boolean' },
+                  adminPassword: { type: 'string' },
+                  resetPasswordRequired: { type: 'boolean' },
+                  customizationScript: { type: 'string' },
+                  changeSid: { type: 'boolean' }
+                }
+              }
+            },
+            required: ['vappId', 'templateId', 'vmName']
+          }
+        },
+        {
+          name: 'update_vm_network',
+          description: 'Update a VM NIC\'s network/IP properties. Takes flat parameters (nicIndex, networkName, ipMode, ipAddress, isPrimary) — NOT a networkConnections array. The networkName must match the name of a network the vApp already has configured (as shown in get_vm networkConnections[].network). VM can be running or powered off.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID' },
+              nicIndex: { type: 'number', description: 'NIC index to update (default: 0 — first NIC)' },
+              networkName: { type: 'string', description: 'New org VDC network name to connect this NIC to' },
+              ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode' },
+              ipAddress: { type: 'string', description: 'Static IP address (required when ipMode=MANUAL)' },
+              isPrimary: { type: 'boolean', description: 'Set this NIC as the primary NIC' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
+          }
+        },
+        {
+          name: 'list_application_port_profiles',
+          description: 'List application port profiles (system-defined and tenant-defined). Use this to find the URN needed for create_firewall_rule portProfileId, create_nat_rule applicationPortProfileId, etc.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              filter: {
+                type: 'string',
+                enum: ['ALL', 'SYSTEM', 'TENANT'],
+                description: 'Scope filter: ALL (default), SYSTEM (built-in), or TENANT (custom)'
+              },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            }
+          }
+        },
+        {
+          name: 'create_application_port_profile',
+          description: 'Create a custom application port profile (tenant-scoped). Returns the new profile\'s URN for use in firewall rules and NAT rules. Use list_application_port_profiles first to check if a built-in profile already exists.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              name: { type: 'string', description: 'Profile name (e.g. "Custom-SSH-13022")' },
+              contextEntityId: { type: 'string', description: 'VDC URN to scope the profile — MUST be "urn:vcloud:vdc:{uuid}" (NOT a gateway URN). Get the VDC UUID from list_vdcs.' },
+              ports: {
+                type: 'array',
+                description: 'One or more port/protocol definitions',
+                items: {
+                  type: 'object',
+                  properties: {
+                    protocol: { type: 'string', enum: ['TCP', 'UDP', 'ICMPv4', 'ICMPv6'], description: 'Protocol' },
+                    destinationPorts: {
+                      type: 'array',
+                      items: { type: 'string' },
+                      description: 'Destination port numbers or ranges (e.g. ["80", "8080-8090"])'
+                    }
+                  },
+                  required: ['protocol', 'destinationPorts']
+                }
+              },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['name', 'contextEntityId', 'ports']
+          }
         }
       ]
     }));
@@ -1130,6 +1264,9 @@ export class ZettagridMcpServer {
               isEnabled: args?.isEnabled as boolean,
               enableLogging: args?.enableLogging as boolean,
               portProfiles: args?.portProfiles as string[] | undefined,
+              portProfileId: args?.portProfileId as string | undefined,
+              sourceFirewallGroups: args?.sourceFirewallGroups as string[] | undefined,
+              destinationFirewallGroups: args?.destinationFirewallGroups as string[] | undefined,
               protocols: {
                 tcp: args?.protocol === 'tcp' || args?.protocol === 'any',
                 udp: args?.protocol === 'udp' || args?.protocol === 'any',
@@ -1177,6 +1314,9 @@ export class ZettagridMcpServer {
                 sourceIp: args?.sourceIp as string | undefined,
                 destinationIp: args?.destinationIp as string | undefined,
                 portProfiles: args?.portProfiles as string[] | undefined,
+                portProfileId: args?.portProfileId as string | undefined,
+                sourceFirewallGroups: args?.sourceFirewallGroups as string[] | undefined,
+                destinationFirewallGroups: args?.destinationFirewallGroups as string[] | undefined,
                 enableLogging: args?.enableLogging as boolean | undefined,
               } as any,
               args?.zoneId as string | undefined
@@ -1316,7 +1456,41 @@ export class ZettagridMcpServer {
             result = await this.client.powerOffVApp(req('vappId'), args?.zoneId as string | undefined);
             break;
 
-          case 'create_vapp':
+          case 'create_vapp': {
+            // Input validation: catch common parameter mistakes before sending to vCD
+            const configErrors: string[] = [];
+            if (args?.vmConfigs !== undefined) {
+              configErrors.push('"vmConfigs" was passed at the top level — it must be inside instantiationParams.vmConfigs (e.g. instantiationParams: { vmConfigs: [...] })');
+            }
+            if (args?.ovfProperties !== undefined) {
+              configErrors.push('"ovfProperties" was passed at the top level — it must be inside instantiationParams.vmConfigs[].ovfProperties');
+            }
+            if (args?.networkConnections !== undefined) {
+              configErrors.push('"networkConnections" was passed at the top level — it must be inside instantiationParams.vmConfigs[].networkConnections');
+            }
+            const vmCfgs = (args?.instantiationParams as any)?.vmConfigs;
+            if (Array.isArray(vmCfgs)) {
+              vmCfgs.forEach((cfg: any, i: number) => {
+                if (cfg?.name !== undefined && cfg?.vmName === undefined) {
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: use "vmName" not "name" to set the VM display name`);
+                }
+                if (cfg?.cpus !== undefined && cfg?.cpuCount === undefined) {
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: use "cpuCount" not "cpus"`);
+                }
+                if (cfg?.memorySizeMB !== undefined && cfg?.memoryMB === undefined) {
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: use "memoryMB" not "memorySizeMB"`);
+                }
+                if (cfg?.memory !== undefined && cfg?.memoryMB === undefined) {
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: use "memoryMB" not "memory"`);
+                }
+              });
+            }
+            if (configErrors.length > 0) {
+              throw new McpError(
+                ErrorCode.InvalidParams,
+                `create_vapp parameter errors:\n${configErrors.map(e => `  • ${e}`).join('\n')}`
+              );
+            }
             result = await this.client.createVApp(
               req('vdcId'),
               req('templateId'),
@@ -1325,6 +1499,7 @@ export class ZettagridMcpServer {
               args?.instantiationParams as import('../types.js').VAppInstantiationParams | undefined
             );
             break;
+          }
 
           case 'list_disks':
             result = await this.client.listDisks(args?.zoneId as string | undefined);
@@ -1374,6 +1549,51 @@ export class ZettagridMcpServer {
             result = await this.client.getZoneInfo();
             break;
 
+          case 'add_vm_to_vapp':
+            result = await this.client.addVMToVApp(
+              req('vappId'),
+              req('templateId'),
+              req('vmName'),
+              {
+                networkConnections: args?.networkConnections as import('../types.js').VAppNetworkConnection[] | undefined,
+                ovfProperties: args?.ovfProperties as import('../types.js').VAppOvfProperty[] | undefined,
+                guestCustomization: args?.guestCustomization as import('../types.js').VAppGuestCustomization | undefined,
+              },
+              args?.vdcId as string | undefined,
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'update_vm_network':
+            result = await this.client.updateVMNetwork(
+              req('vmId'),
+              {
+                nicIndex: args?.nicIndex as number | undefined,
+                networkName: args?.networkName as string | undefined,
+                ipMode: args?.ipMode as 'DHCP' | 'POOL' | 'MANUAL' | 'NONE' | undefined,
+                ipAddress: args?.ipAddress as string | undefined,
+                isPrimary: args?.isPrimary as boolean | undefined,
+              },
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'list_application_port_profiles':
+            result = await this.client.listApplicationPortProfiles(
+              args?.filter as string | undefined,
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'create_application_port_profile':
+            result = await this.client.createApplicationPortProfile(
+              req('name'),
+              req('contextEntityId'),
+              args?.ports as Array<{ protocol: string; destinationPorts: string[] }>,
+              args?.zoneId as string | undefined
+            );
+            break;
+
           default:
             throw new McpError(
               ErrorCode.MethodNotFound,
@@ -1395,6 +1615,17 @@ export class ZettagridMcpServer {
           throw error;
         }
         const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        // Detect vCD concurrent-update conflict (HTTP 400 VAPP_UPDATE_VM with a blocking task ID)
+        const concurrentMatch = errorMessage.match(/VAPP_UPDATE_VM\(com\.vmware\.vcloud\.entity\.task:([a-f0-9-]+)\)/);
+        if (concurrentMatch) {
+          const blockingTaskId = concurrentMatch[1];
+          throw new McpError(
+            ErrorCode.InternalError,
+            `VM update conflict: another update is still running (task ${blockingTaskId}). ` +
+            `Wait for it to complete with get_task(taskId: "${blockingTaskId}") before retrying. ` +
+            `vCD only allows one concurrent hardware update per VM.`
+          );
+        }
         throw new McpError(
           ErrorCode.InternalError,
           `Tool execution failed: ${errorMessage}`
