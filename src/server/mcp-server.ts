@@ -1151,6 +1151,18 @@ export class ZettagridMcpServer {
             },
             required: ['name', 'contextEntityId', 'ports']
           }
+        },
+        {
+          name: 'delete_application_port_profile',
+          description: 'Delete a tenant-scoped application port profile by its URN or UUID. Only tenant-created profiles can be deleted; system-defined profiles will return an error. Delete any NAT/firewall rules that reference the profile before deleting it.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              profileId: { type: 'string', description: 'Application port profile URN (e.g. "urn:vcloud:applicationPortProfile:uuid") or bare UUID' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['profileId']
+          }
         }
       ]
     }));
@@ -1590,6 +1602,13 @@ export class ZettagridMcpServer {
               req('name'),
               req('contextEntityId'),
               args?.ports as Array<{ protocol: string; destinationPorts: string[] }>,
+              args?.zoneId as string | undefined
+            );
+            break;
+
+          case 'delete_application_port_profile':
+            result = await this.client.deleteApplicationPortProfile(
+              req('profileId'),
               args?.zoneId as string | undefined
             );
             break;

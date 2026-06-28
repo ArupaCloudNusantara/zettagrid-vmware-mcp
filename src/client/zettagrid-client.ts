@@ -2800,6 +2800,22 @@ export class ZettagridClient {
     }
   }
 
+  async deleteApplicationPortProfile(profileId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      // Strip URN prefix if present — CloudAPI path needs only the UUID
+      const uuid = profileId.includes(':') ? profileId.split(':').pop()! : profileId;
+      await this.makeCloudApiRequest<any>('DELETE', `/applicationPortProfiles/${uuid}`, zoneId);
+      return this.formatMcpResponse({ deleted: true, profileId }, zone);
+    } catch (error) {
+      return this.formatMcpResponse({}, zone, {
+        code: 'DELETE_APP_PORT_PROFILE_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to delete application port profile',
+        details: error,
+      });
+    }
+  }
+
   /**
    * Get the status of an async task by its task ID.
    * Use after power ops, create_vapp, snapshots, etc. to poll for completion.
