@@ -2803,9 +2803,9 @@ export class ZettagridClient {
   async deleteApplicationPortProfile(profileId: string, zoneId?: string): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      // Strip URN prefix if present — CloudAPI path needs only the UUID
-      const uuid = profileId.includes(':') ? profileId.split(':').pop()! : profileId;
-      await this.makeCloudApiRequest<any>('DELETE', `/applicationPortProfiles/${uuid}`, zoneId);
+      // vCD CloudAPI expects the full URN in the path
+      const id = profileId.startsWith('urn:vcloud:') ? profileId : `urn:vcloud:applicationPortProfile:${profileId}`;
+      await this.makeCloudApiRequest<any>('DELETE', `/applicationPortProfiles/${id}`, zoneId);
       return this.formatMcpResponse({ deleted: true, profileId }, zone);
     } catch (error) {
       return this.formatMcpResponse({}, zone, {
