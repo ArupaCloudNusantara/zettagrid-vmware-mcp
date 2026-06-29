@@ -629,13 +629,14 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_cpu',
-          description: 'Update the vCPU count of a VM. VM must be powered off. SEQUENTIAL ONLY: vCD rejects concurrent updates to the same VM — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk.',
+          description: 'Update the vCPU count of a VM. VM must be powered off. SEQUENTIAL ONLY: vCD rejects concurrent updates to the same VM — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk. Optionally enable CPU hot-add (allows adding vCPUs while VM is running in future).',
           inputSchema: {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
               cpuCount: { type: 'number', description: 'Number of vCPUs (e.g. 2, 4, 8)' },
-              coresPerSocket: { type: 'number', description: 'Cores per socket (default 1 — all cores in one socket)' },
+              coresPerSocket: { type: 'number', description: 'Cores per socket. Default: min(cpuCount, 16) — minimises socket count while capping at 16 cores/socket (e.g. 32 vCPU → 2 sockets × 16 cores). Only override for specific NUMA or licensing requirements.' },
+              cpuHotAdd: { type: 'boolean', description: 'Enable CPU hot-add (true) or disable it (false). When enabled, vCPUs can be added while the VM is powered on. Must be set while VM is powered off.' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'cpuCount']
@@ -1383,7 +1384,8 @@ export class ZettagridMcpServer {
               req('vmId'),
               reqNum('cpuCount'),
               args?.coresPerSocket as number | undefined,
-              args?.zoneId as string | undefined
+              args?.zoneId as string | undefined,
+              args?.cpuHotAdd as boolean | undefined
             );
             break;
 

@@ -2432,9 +2432,12 @@ export class ZettagridClient {
    * Update the vCPU count of a VM. VM must be POWERED_OFF (status=8).
    * coresPerSocket defaults to 1 (all cores in one socket).
    */
-  async updateVMCpu(vmId: string, cpuCount: number, coresPerSocket: number = 1, zoneId?: string): Promise<McpToolResponse<any>> {
+  async updateVMCpu(vmId: string, cpuCount: number, coresPerSocket?: number, zoneId?: string, cpuHotAdd?: boolean): Promise<McpToolResponse<any>> {
+    // Default: max 16 cores/socket, minimising socket count (e.g. 32 vCPU → 2 sockets × 16 cores)
+    coresPerSocket = coresPerSocket ?? Math.min(cpuCount, 16);
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      const payload = `<?xml version="1.0" encoding="UTF-8"?>
+      const cpuPayload = `<?xml version="1.0" encoding="UTF-8"?>
 <Item xmlns="http://www.vmware.com/vcloud/v1.5"
       xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
       xmlns:vmw="http://www.vmware.com/schema/ovf">
@@ -2449,15 +2452,41 @@ export class ZettagridClient {
       const response = await this.makeRequest<string>({
         method: 'PUT',
         url: `/vApp/vm-${vmId}/virtualHardwareSection/cpu`,
-        data: payload,
+        data: cpuPayload,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItem+xml' }
       }, zoneId);
+
+      const taskResult = parseTaskResponse(response.data);
+
+      // Optionally update CPU hot-add capability
+      if (cpuHotAdd !== undefined) {
+        // GET current capabilities to preserve MemoryHotAddEnabled
+        const capsResp = await this.makeRequest<string>({
+          method: 'GET',
+          url: `/vApp/vm-${vmId}/vmCapabilities`,
+        }, zoneId);
+        const memHotAdd = /<MemoryHotAddEnabled>(true|false)<\/MemoryHotAddEnabled>/.exec(capsResp.data)?.[1] ?? 'false';
+
+        const capsPayload = `<?xml version="1.0" encoding="UTF-8"?>
+<VmCapabilitiesSection xmlns="http://www.vmware.com/vcloud/v1.5"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <MemoryHotAddEnabled>${memHotAdd}</MemoryHotAddEnabled>
+  <CpuHotAddEnabled>${cpuHotAdd}</CpuHotAddEnabled>
+</VmCapabilitiesSection>`;
+        await this.makeRequest<string>({
+          method: 'PUT',
+          url: `/vApp/vm-${vmId}/vmCapabilities`,
+          data: capsPayload,
+          headers: { 'Content-Type': 'application/vnd.vmware.vcloud.vmCapabilitiesSection+xml' }
+        }, zoneId);
+      }
+
       return this.formatMcpResponse(
-        { ...parseTaskResponse(response.data), cpuCount, coresPerSocket },
-        zoneId || this.zoneManager.getConfig().defaultZone
+        { ...taskResult, cpuCount, coresPerSocket, ...(cpuHotAdd !== undefined && { cpuHotAdd }) },
+        zone
       );
     } catch (error) {
-      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({}, zone, {
         code: 'UPDATE_VM_CPU_ERROR',
         message: error instanceof Error ? error.message : 'Failed to update VM CPU — ensure VM is powered off',
         details: error
