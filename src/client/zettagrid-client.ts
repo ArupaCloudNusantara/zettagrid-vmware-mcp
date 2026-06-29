@@ -2529,6 +2529,32 @@ export class ZettagridClient {
   async updateVMMemory(vmId: string, memoryMB: number, zoneId?: string, memoryHotAdd?: boolean): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
+      // Guard: block hot-add that crosses the 3 GB boundary on a powered-on VM (VMware KB 343190).
+      // Linux guests freeze when memory grows from ≤3 GB to >3 GB while running.
+      const THREE_GB_MB = 3072;
+      if (memoryMB > THREE_GB_MB) {
+        const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmId}` }, zoneId);
+        const isPoweredOn = /\bstatus="4"/.test(vmResp.data as unknown as string);
+        if (isPoweredOn) {
+          const memResp = await this.makeRequest<string>({
+            method: 'GET', url: `/vApp/vm-${vmId}/virtualHardwareSection/memory`
+          }, zoneId);
+          const currentMemMatch = /<rasd:VirtualQuantity>(\d+)<\/rasd:VirtualQuantity>/.exec(memResp.data as unknown as string);
+          const currentMemMB = currentMemMatch?.[1] ? parseInt(currentMemMatch[1], 10) : 0;
+          if (currentMemMB <= THREE_GB_MB) {
+            return this.formatMcpResponse({}, zone, {
+              code: 'MEMORY_HOT_ADD_BOUNDARY_VIOLATION',
+              message:
+                `Cannot hot-add memory from ${currentMemMB} MB to ${memoryMB} MB on a powered-on VM: ` +
+                `crossing the 3 GB boundary (≤3072 MB → >3072 MB) causes Linux guests to freeze (VMware KB 343190). ` +
+                `Safe path: (1) power off the VM, (2) call update_vm_memory with memoryMB=${memoryMB} and memoryHotAdd=true, ` +
+                `(3) power on. The VM will then start above 3 GB and you can hot-add freely up to 16× that size.`,
+              details: { currentMemMB, requestedMemMB: memoryMB, boundaryMB: THREE_GB_MB }
+            });
+          }
+        }
+      }
+
       const payload = `<?xml version="1.0" encoding="UTF-8"?>
 <Item xmlns="http://www.vmware.com/vcloud/v1.5"
       xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData">
