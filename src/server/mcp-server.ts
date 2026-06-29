@@ -1402,7 +1402,8 @@ export class ZettagridMcpServer {
             result = await this.client.updateVMMemory(
               req('vmId'),
               reqNum('memoryMB'),
-              args?.zoneId as string | undefined
+              args?.zoneId as string | undefined,
+              args?.memoryHotAdd as boolean | undefined
             );
             break;
 
