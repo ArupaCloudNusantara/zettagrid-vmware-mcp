@@ -407,7 +407,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_firewall_rule',
-          description: 'Create a firewall rule',
+          description: 'Create an NSX-T firewall rule on an edge gateway. Required fields: edgeGatewayId, name, policy ("allow" or "drop" — NOT "action"). For port-based matching pass portProfiles (array of URNs) — NOT portProfileIds. Typical DNAT companion: direction=IN, policy=allow, portProfiles=[external-port-profile-URN]. Use list_application_port_profiles to find URNs.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -425,7 +425,7 @@ export class ZettagridMcpServer {
               },
               policy: {
                 type: 'string',
-                description: 'Firewall policy',
+                description: 'REQUIRED. Traffic action — use "allow" or "drop" (NOT "action", NOT "ALLOW").',
                 enum: ['allow', 'drop']
               },
               sourceIp: {
@@ -460,11 +460,11 @@ export class ZettagridMcpServer {
               portProfiles: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Application port profile URNs to match (e.g. "urn:vcloud:applicationPortProfile:xxx"). Leave empty to match any application/port.'
+                description: 'Application port profile URNs to match — use THIS (NOT portProfileIds). E.g. ["urn:vcloud:applicationPortProfile:xxx"]. Omit to match any port.'
               },
               portProfileId: {
                 type: 'string',
-                description: 'Single application port profile URN (alternative to portProfiles array)'
+                description: 'Single application port profile URN (alternative to portProfiles array for a single profile)'
               },
               sourceFirewallGroups: {
                 type: 'array',
@@ -482,7 +482,7 @@ export class ZettagridMcpServer {
                 enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung']
               }
             },
-            required: ['edgeGatewayId', 'name']
+            required: ['edgeGatewayId', 'name', 'policy']
           }
         },
         {
@@ -656,12 +656,12 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_disk',
-          description: 'Resize the boot disk of a VM. VM must be powered off. Size can only be increased, not decreased. SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_memory task to complete first.',
+          description: 'Resize the boot disk of a VM. VM must be powered off. Size can only be increased, not decreased. Parameter is "diskSizeMB" (NOT diskSizeGB — multiply GB × 1024, e.g. 20 GB = 20480). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_memory task to complete first.',
           inputSchema: {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
-              diskSizeMB: { type: 'number', description: 'New disk size in MB (e.g. 20480=20GB, 51200=50GB)' },
+              diskSizeMB: { type: 'number', description: 'New disk size in MB — use diskSizeMB NOT diskSizeGB (20 GB = 20480, 50 GB = 51200)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'diskSizeMB']
@@ -1125,7 +1125,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_application_port_profile',
-          description: 'Create a custom application port profile (tenant-scoped). Returns the new profile\'s URN for use in firewall rules and NAT rules. Use list_application_port_profiles first to check if a built-in profile already exists.',
+          description: 'Create a custom application port profile (tenant-scoped). NOTE: the response data is empty — the URN is NOT returned. After creation call list_application_port_profiles(filter: TENANT) to retrieve the new profile\'s URN. Use list_application_port_profiles first to avoid creating duplicates.',
           inputSchema: {
             type: 'object',
             properties: {
