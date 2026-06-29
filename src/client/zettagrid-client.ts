@@ -2468,11 +2468,13 @@ export class ZettagridClient {
         const memHotAdd = /<MemoryHotAddEnabled>(true|false)<\/MemoryHotAddEnabled>/.exec(capsResp.data)?.[1] ?? 'false';
 
         const capsPayload = `<?xml version="1.0" encoding="UTF-8"?>
-<VmCapabilitiesSection xmlns="http://www.vmware.com/vcloud/v1.5"
-    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+<VmCapabilities xmlns="http://www.vmware.com/vcloud/v1.5"
+    xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
+    xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+    xmlns:vmw="http://www.vmware.com/schema/ovf">
   <MemoryHotAddEnabled>${memHotAdd}</MemoryHotAddEnabled>
   <CpuHotAddEnabled>${cpuHotAdd}</CpuHotAddEnabled>
-</VmCapabilitiesSection>`;
+</VmCapabilities>`;
         await this.makeRequest<string>({
           method: 'PUT',
           url: `/vApp/vm-${vmId}/vmCapabilities`,
