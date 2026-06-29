@@ -658,7 +658,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_disk',
-          description: 'Resize the boot disk of a VM. VM must be powered off. Size can only be increased, not decreased. Parameter is "diskSizeMB" (NOT diskSizeGB — multiply GB × 1024, e.g. 20 GB = 20480). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_memory task to complete first.',
+          description: 'Extend the boot disk of a VM. Can be done while the VM is powered on (vCD supports online disk extend). Size can only be increased, never decreased — shrink attempts are blocked. Parameter is "diskSizeMB" (NOT diskSizeGB — multiply GB × 1024, e.g. 20 GB = 20480). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_memory task to complete first.',
           inputSchema: {
             type: 'object',
             properties: {

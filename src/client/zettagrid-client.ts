@@ -2640,6 +2640,19 @@ export class ZettagridClient {
         throw new Error(`Disk InstanceID 2000 not found. Present IDs: [${ids.join(', ')}]`);
       }
 
+      // Block shrink — vCD/vSphere does not support decreasing disk size
+      const currentCapacityMatch = /\w+:capacity="(\d+)"/.exec(diskItem);
+      const currentDiskMB = currentCapacityMatch?.[1] ? parseInt(currentCapacityMatch[1], 10) : 0;
+      if (diskSizeMB < currentDiskMB) {
+        return this.formatMcpResponse({}, zone, {
+          code: 'DISK_SHRINK_NOT_SUPPORTED',
+          message: `Cannot shrink disk from ${currentDiskMB} MB to ${diskSizeMB} MB. ` +
+            `vSphere/vCD does not support decreasing disk size. ` +
+            `To reclaim space, delete and redeploy the VM with a smaller disk.`,
+          details: { currentDiskMB, requestedDiskMB: diskSizeMB }
+        });
+      }
+
       // VirtualQuantity is in bytes; capacity attribute is in MB with a dynamic namespace prefix
       const diskSizeBytes = diskSizeMB * 1024 * 1024;
       const capacityPrefix = diskItem.match(/(\w+):capacity="\d+"/)?.[1] ?? 'ns10';
