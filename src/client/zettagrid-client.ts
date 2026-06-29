@@ -2544,10 +2544,9 @@ export class ZettagridClient {
   async updateVMMemory(vmId: string, memoryMB: number, zoneId?: string, memoryHotAdd?: boolean): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      // Guard: block hot-add that crosses the 3 GB boundary on a powered-on VM (VMware KB 343190).
-      // Linux guests freeze when memory grows from ≤3 GB to >3 GB while running.
+      // Guards for powered-on VMs: check state once, apply all rules.
       const THREE_GB_MB = 3072;
-      if (memoryMB > THREE_GB_MB) {
+      {
         const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmId}` }, zoneId);
         const isPoweredOn = /\bstatus="4"/.test(vmResp.data as unknown as string);
         if (isPoweredOn) {
@@ -2556,7 +2555,19 @@ export class ZettagridClient {
           }, zoneId);
           const currentMemMatch = /<rasd:VirtualQuantity>(\d+)<\/rasd:VirtualQuantity>/.exec(memResp.data as unknown as string);
           const currentMemMB = currentMemMatch?.[1] ? parseInt(currentMemMatch[1], 10) : 0;
-          if (currentMemMB <= THREE_GB_MB) {
+
+          // Block reduction — vSphere does not support memory hot-remove.
+          if (currentMemMB > 0 && memoryMB < currentMemMB) {
+            return this.formatMcpResponse({}, zone, {
+              code: 'MEMORY_REDUCE_REQUIRES_POWER_OFF',
+              message: `Cannot reduce memory from ${currentMemMB} MB to ${memoryMB} MB on a powered-on VM. ` +
+                `vSphere supports hot-add (increasing) only, not hot-remove. Power off the VM first.`,
+              details: { currentMemMB, requestedMemMB: memoryMB }
+            });
+          }
+
+          // Block 3 GB boundary crossing — Linux guests freeze (VMware KB 343190).
+          if (memoryMB > THREE_GB_MB && currentMemMB <= THREE_GB_MB) {
             return this.formatMcpResponse({}, zone, {
               code: 'MEMORY_HOT_ADD_BOUNDARY_VIOLATION',
               message:
