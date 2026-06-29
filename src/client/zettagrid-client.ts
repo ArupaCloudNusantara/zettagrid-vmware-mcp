@@ -2435,19 +2435,34 @@ export class ZettagridClient {
   async updateVMCpu(vmId: string, cpuCount: number, coresPerSocket?: number, zoneId?: string, cpuHotAdd?: boolean): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      // If coresPerSocket not explicitly provided, preserve the current value so that
-      // hot-add on a powered-on VM isn't rejected for trying to change socket topology.
-      // Fall back to min(cpuCount, 16) only when the current value can't be read.
-      if (coresPerSocket === undefined) {
-        try {
-          const cpuXml = await this.makeRequest<string>({
-            method: 'GET',
-            url: `/vApp/vm-${vmId}/virtualHardwareSection/cpu`,
-          }, zoneId);
-          const match = /<vmw:CoresPerSocket[^>]*>(\d+)<\/vmw:CoresPerSocket>/.exec(cpuXml.data);
-          coresPerSocket = match?.[1] ? parseInt(match[1], 10) : Math.min(cpuCount, 16);
-        } catch {
-          coresPerSocket = Math.min(cpuCount, 16);
+      // GET current CPU config: preserves coresPerSocket for hot-add and detects current count for reduction guard.
+      let currentCpuCount = 0;
+      try {
+        const cpuXml = await this.makeRequest<string>({
+          method: 'GET',
+          url: `/vApp/vm-${vmId}/virtualHardwareSection/cpu`,
+        }, zoneId);
+        const cpsMatch = /<vmw:CoresPerSocket[^>]*>(\d+)<\/vmw:CoresPerSocket>/.exec(cpuXml.data);
+        const vqMatch = /<rasd:VirtualQuantity>(\d+)<\/rasd:VirtualQuantity>/.exec(cpuXml.data);
+        if (coresPerSocket === undefined) {
+          coresPerSocket = cpsMatch?.[1] ? parseInt(cpsMatch[1], 10) : Math.min(cpuCount, 16);
+        }
+        currentCpuCount = vqMatch?.[1] ? parseInt(vqMatch[1], 10) : 0;
+      } catch {
+        if (coresPerSocket === undefined) coresPerSocket = Math.min(cpuCount, 16);
+      }
+
+      // Block CPU reduction on a powered-on VM — vSphere supports hot-add only, not hot-remove.
+      if (currentCpuCount > 0 && cpuCount < currentCpuCount) {
+        const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmId}` }, zoneId);
+        const isPoweredOn = /\bstatus="4"/.test(vmResp.data as unknown as string);
+        if (isPoweredOn) {
+          return this.formatMcpResponse({}, zone, {
+            code: 'CPU_REDUCE_REQUIRES_POWER_OFF',
+            message: `Cannot reduce vCPUs from ${currentCpuCount} to ${cpuCount} on a powered-on VM. ` +
+              `vSphere supports hot-add (increasing) only, not hot-remove. Power off the VM first.`,
+            details: { currentCpuCount, requestedCpuCount: cpuCount }
+          });
         }
       }
       const cpuPayload = `<?xml version="1.0" encoding="UTF-8"?>

@@ -629,7 +629,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_cpu',
-          description: 'Update the vCPU count of a VM and/or manage CPU hot-add. Two modes: (1) Powered-off VM — change cpuCount freely and optionally set cpuHotAdd to enable/disable hot-add. (2) Powered-on VM with hot-add enabled — change cpuCount WITHOUT providing coresPerSocket; the tool automatically preserves the existing socket topology so vCD does not reject the change. SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk.',
+          description: 'Update the vCPU count of a VM and/or manage CPU hot-add. Two modes: (1) Powered-off VM — change cpuCount freely (increase or decrease) and optionally set cpuHotAdd to enable/disable hot-add. (2) Powered-on VM with hot-add enabled — increase cpuCount only (hot-remove is not supported; reducing vCPUs on a running VM is blocked). Do NOT provide coresPerSocket when hot-adding — the tool preserves the existing socket topology automatically to avoid vCD rejecting the change. SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk.',
           inputSchema: {
             type: 'object',
             properties: {
