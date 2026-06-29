@@ -2526,7 +2526,8 @@ export class ZettagridClient {
    * Update the RAM of a VM. VM must be POWERED_OFF (status=8).
    * memoryMB is in megabytes (e.g. 8192 = 8 GB).
    */
-  async updateVMMemory(vmId: string, memoryMB: number, zoneId?: string): Promise<McpToolResponse<any>> {
+  async updateVMMemory(vmId: string, memoryMB: number, zoneId?: string, memoryHotAdd?: boolean): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
       const payload = `<?xml version="1.0" encoding="UTF-8"?>
 <Item xmlns="http://www.vmware.com/vcloud/v1.5"
@@ -2544,12 +2545,41 @@ export class ZettagridClient {
         data: payload,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItem+xml' }
       }, zoneId);
+      const taskResult = parseTaskResponse(response.data);
+
+      if (memoryHotAdd !== undefined) {
+        // Wait for memory update task before touching vmCapabilities
+        const memTaskId = taskResult.taskId as string | undefined;
+        if (memTaskId) {
+          const deadline = Date.now() + 120_000;
+          while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 3000));
+            const t = await this.getTask(memTaskId, zoneId);
+            const s = t.data?.taskStatus;
+            if (s === 'success') break;
+            if (s === 'error' || s === 'aborted') throw new Error(`Memory update task ${memTaskId} ended with status=${s}`);
+          }
+        }
+        // GET current capabilities to preserve CpuHotAddEnabled
+        const capsResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmId}/vmCapabilities` }, zoneId);
+        const cpuHotAdd = /<CpuHotAddEnabled>(true|false)<\/CpuHotAddEnabled>/.exec(capsResp.data)?.[1] ?? 'false';
+        const capsPayload = `<?xml version="1.0" encoding="UTF-8"?>
+<VmCapabilities xmlns="http://www.vmware.com/vcloud/v1.5"
+    xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1"
+    xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"
+    xmlns:vmw="http://www.vmware.com/schema/ovf">
+  <MemoryHotAddEnabled>${memoryHotAdd}</MemoryHotAddEnabled>
+  <CpuHotAddEnabled>${cpuHotAdd}</CpuHotAddEnabled>
+</VmCapabilities>`;
+        await this.makeRequest<string>({ method: 'PUT', url: `/vApp/vm-${vmId}/vmCapabilities`, data: capsPayload, headers: { 'Content-Type': 'application/vnd.vmware.vcloud.vmCapabilitiesSection+xml' } }, zoneId);
+      }
+
       return this.formatMcpResponse(
-        { ...parseTaskResponse(response.data), memoryMB },
-        zoneId || this.zoneManager.getConfig().defaultZone
+        { ...taskResult, memoryMB, ...(memoryHotAdd !== undefined && { memoryHotAdd }) },
+        zone
       );
     } catch (error) {
-      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({}, zone, {
         code: 'UPDATE_VM_MEMORY_ERROR',
         message: error instanceof Error ? error.message : 'Failed to update VM memory — ensure VM is powered off',
         details: error

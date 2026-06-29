@@ -644,12 +644,13 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_memory',
-          description: 'Update the RAM of a VM. VM must be powered off. Parameter is "memoryMB" (NOT memorySizeMB). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_disk task to complete first.',
+          description: 'Update the RAM of a VM and/or manage memory hot-add. Two modes: (1) Powered-off VM — change memoryMB freely and optionally set memoryHotAdd to enable/disable hot-add. (2) Powered-on VM with hot-add enabled — increase memoryMB only (cannot decrease while running). Parameter is "memoryMB" (NOT memorySizeMB). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_disk task to complete first. WARNING — Linux guest 3GB boundary: hot-adding memory that crosses from ≤3GB to >3GB on a powered-on Linux VM causes the guest OS to freeze (VMware KB 343190). To safely expand beyond 3GB, power off the VM, set memory above 3GB, then power on before enabling hot-add. Once the VM starts above 3GB, hot-add can expand up to 16× the initial powered-on size.',
           inputSchema: {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
               memoryMB: { type: 'number', description: 'Memory in MB (e.g. 1024=1GB, 2048=2GB, 4096=4GB, 8192=8GB)' },
+              memoryHotAdd: { type: 'boolean', description: 'Enable memory hot-add (true) or disable it (false). Allows increasing RAM on a running VM in future. Must be set while VM is powered off; do not pass this when hot-adding memory to a running VM.' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'memoryMB']
