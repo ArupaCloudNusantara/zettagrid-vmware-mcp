@@ -2433,10 +2433,23 @@ export class ZettagridClient {
    * coresPerSocket defaults to 1 (all cores in one socket).
    */
   async updateVMCpu(vmId: string, cpuCount: number, coresPerSocket?: number, zoneId?: string, cpuHotAdd?: boolean): Promise<McpToolResponse<any>> {
-    // Default: max 16 cores/socket, minimising socket count (e.g. 32 vCPU → 2 sockets × 16 cores)
-    coresPerSocket = coresPerSocket ?? Math.min(cpuCount, 16);
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
+      // If coresPerSocket not explicitly provided, preserve the current value so that
+      // hot-add on a powered-on VM isn't rejected for trying to change socket topology.
+      // Fall back to min(cpuCount, 16) only when the current value can't be read.
+      if (coresPerSocket === undefined) {
+        try {
+          const cpuXml = await this.makeRequest<string>({
+            method: 'GET',
+            url: `/vApp/vm-${vmId}/virtualHardwareSection/cpu`,
+          }, zoneId);
+          const match = /<vmw:CoresPerSocket[^>]*>(\d+)<\/vmw:CoresPerSocket>/.exec(cpuXml.data);
+          coresPerSocket = match?.[1] ? parseInt(match[1], 10) : Math.min(cpuCount, 16);
+        } catch {
+          coresPerSocket = Math.min(cpuCount, 16);
+        }
+      }
       const cpuPayload = `<?xml version="1.0" encoding="UTF-8"?>
 <Item xmlns="http://www.vmware.com/vcloud/v1.5"
       xmlns:rasd="http://schemas.dmtf.org/wbem/wscim/1/cim-schema/2/CIM_ResourceAllocationSettingData"

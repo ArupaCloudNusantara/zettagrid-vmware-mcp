@@ -629,14 +629,14 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_cpu',
-          description: 'Update the vCPU count of a VM. VM must be powered off. SEQUENTIAL ONLY: vCD rejects concurrent updates to the same VM — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk. Optionally enable CPU hot-add (allows adding vCPUs while VM is running in future).',
+          description: 'Update the vCPU count of a VM and/or manage CPU hot-add. Two modes: (1) Powered-off VM — change cpuCount freely and optionally set cpuHotAdd to enable/disable hot-add. (2) Powered-on VM with hot-add enabled — change cpuCount WITHOUT providing coresPerSocket; the tool automatically preserves the existing socket topology so vCD does not reject the change. SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk.',
           inputSchema: {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
               cpuCount: { type: 'number', description: 'Number of vCPUs (e.g. 2, 4, 8)' },
-              coresPerSocket: { type: 'number', description: 'Cores per socket. Default: min(cpuCount, 16) — minimises socket count while capping at 16 cores/socket (e.g. 32 vCPU → 2 sockets × 16 cores). Only override for specific NUMA or licensing requirements.' },
-              cpuHotAdd: { type: 'boolean', description: 'Enable CPU hot-add (true) or disable it (false). When enabled, vCPUs can be added while the VM is powered on. Must be set while VM is powered off.' },
+              coresPerSocket: { type: 'number', description: 'Cores per socket. If omitted, the current value is read from the VM and preserved (important for hot-add on powered-on VMs). For new/powered-off VMs with no prior value, defaults to min(cpuCount, 16) to minimise socket count. Only set explicitly for specific NUMA or licensing requirements.' },
+              cpuHotAdd: { type: 'boolean', description: 'Enable CPU hot-add (true) or disable it (false). Allows adding vCPUs to a running VM in future. Must be set while VM is powered off; do not pass this when hot-adding vCPUs to a running VM.' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'cpuCount']
