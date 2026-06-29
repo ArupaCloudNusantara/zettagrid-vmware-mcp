@@ -2460,6 +2460,19 @@ export class ZettagridClient {
 
       // Optionally update CPU hot-add capability
       if (cpuHotAdd !== undefined) {
+        // Wait for CPU update task to complete before touching vmCapabilities
+        const cpuTaskId = taskResult.taskId as string | undefined;
+        if (cpuTaskId) {
+          const deadline = Date.now() + 120_000;
+          while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 3000));
+            const t = await this.getTask(cpuTaskId, zoneId);
+            const s = t.data?.taskStatus;
+            if (s === 'success') break;
+            if (s === 'error' || s === 'aborted') throw new Error(`CPU update task ${cpuTaskId} ended with status=${s}`);
+          }
+        }
+
         // GET current capabilities to preserve MemoryHotAddEnabled
         const capsResp = await this.makeRequest<string>({
           method: 'GET',
