@@ -183,6 +183,7 @@ describe('UC-NET-002 — Update an Existing Firewall Rule', () => {
 
   test('list_firewall_rules reflects updated action', async () => {
     log.separator(UC + ': verify updated action');
+    await new Promise(r => setTimeout(r, 3000));  // allow NSX-T to propagate PUT
     const rules = toArray(await client.call('list_firewall_rules', {
       edgeGatewayId: resolvedEdgeGatewayId,
     }));

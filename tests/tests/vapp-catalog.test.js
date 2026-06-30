@@ -109,6 +109,18 @@ describe('UC-VA-001 — Deploy a vApp from Catalog Template', () => {
 
     // Capture vappId for subsequent tests and teardown
     created.vappId = get(result, 'data', 'vappId') || get(result, 'data', 'id') || get(result, 'vappId') || get(result, 'id');
+
+    // Fallback: if vappId not in response (regex miss on VCD XML), search by name
+    if (!created.vappId) {
+      await new Promise(r => setTimeout(r, 3000));
+      const vapps = toArray(await client.call('list_vapps', {}));
+      const found = vapps.find(v => v.name === vappName);
+      if (found) {
+        created.vappId = found.id || null;
+        log.info(`${UC}: vappId recovered via name search: ${created.vappId}`);
+      }
+    }
+
     log.result(UC, `create_vapp "${vappName}"`, !!created.vappId || !!result,
       `vappId=${created.vappId}`);
     expect(result).toBeTruthy();

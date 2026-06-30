@@ -1733,7 +1733,7 @@ export class ZettagridClient {
       const portProfileId = (firewallRule as any).portProfileId as string | undefined;
       const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId ? [portProfileId] : [])];
       const payload: Record<string, any> = {
-        name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
+        displayName: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
         enabled: firewallRule.isEnabled !== false,
         action: firewallRule.policy === 'allow' ? 'ALLOW' : 'DROP',
         ipProtocol: 'IPV4_IPV6',
@@ -2289,7 +2289,7 @@ export class ZettagridClient {
       const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId ? [portProfileId] : [])];
       const payload: Record<string, any> = {
         id: ruleId,
-        name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
+        displayName: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
         enabled: firewallRule.isEnabled !== false,
         action: firewallRule.policy === 'allow' ? 'ALLOW' : ((firewallRule.policy as string) === 'reject' ? 'REJECT' : 'DROP'),
         ipProtocol: 'IPV4_IPV6',

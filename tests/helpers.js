@@ -15,6 +15,7 @@ async function waitForTask(client, taskId, timeoutMs = cfg.timeouts.taskPoll) {
   let last;
   while (Date.now() < deadline) {
     const raw = await client.call('get_task', { taskId });
+    if (Date.now() >= deadline) break;   // guard: don't log after deadline
     last = raw?.data ?? raw;
     // VCD task status field is 'taskStatus' in parseTaskResponse output
     const status = (last?.taskStatus || last?.status || last?.operationKey || '').toLowerCase();
@@ -44,6 +45,7 @@ async function waitForVmPower(client, vmId, expectedState, timeoutMs = cfg.timeo
   const wantNorm = normalizeStateStr(expectedState);  // 'poweredon', 'poweredoff', 'suspended'
   while (Date.now() < deadline) {
     const raw = await client.call('get_vm', { vmId });
+    if (Date.now() >= deadline) break;   // guard: don't log after deadline
     vm = raw?.data ?? raw;
     // Normalize numeric status integer to a human-readable string
     if (typeof vm.status === 'number') vm.status = ENTITY_STATUS_MAP[vm.status] || vm.statusDescription || String(vm.status);
