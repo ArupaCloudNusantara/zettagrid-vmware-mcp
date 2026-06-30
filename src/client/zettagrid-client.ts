@@ -41,6 +41,27 @@ import {
   parseTaskResponse
 } from '../utils/xml-parser.js';
 
+// VCD ID FORMAT NOTE — recurring source of bugs, read before touching ID-handling code.
+//
+// VCD exposes three ID formats for the same entity:
+//   URN (canonical):  urn:vcloud:vm:UUID  /  urn:vcloud:vapp:UUID
+//   REST path:        /vApp/vm-UUID        /  /vApp/vapp-UUID
+//   Query/filter:     bare UUID only       (NOT the URN form)
+//
+// Rules:
+//   - REST API URL paths: always strip the URN prefix → use vmUuid()/vappUuid()
+//   - /query?filter=container==VALUE: pass bare UUID (vappUuid()), NOT the full URN
+//   - Client inputs and fixture config may be in any format; always normalise before use
+//   - formatMcpResponse data.vappId / data.vmId are bare UUIDs (extracted from hrefs)
+//
+// If a list/filter call returns 0 results when you expect VMs, check the ID format first.
+function vmUuid(vmId: string): string {
+  return vmId.startsWith('urn:vcloud:vm:') ? vmId.slice(14) : vmId;
+}
+function vappUuid(vappId: string): string {
+  return vappId.startsWith('urn:vcloud:vapp:') ? vappId.slice(16) : vappId;
+}
+
 export class ZettagridClient {
   private zoneManager: ZoneManager;
   private tokenManager: TokenManager;
@@ -643,7 +664,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'GET',
-        url: `/vApp/vapp-${vAppId}`
+        url: `/vApp/vapp-${vappUuid(vAppId)}`
       }, zoneId);
 
       // parseVAppDetails extracts root attributes + child VM summaries from <Children>
@@ -665,7 +686,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vapp-${vAppId}/power/action/powerOn`
+        url: `/vApp/vapp-${vappUuid(vAppId)}/power/action/powerOn`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -684,7 +705,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vapp-${vAppId}/power/action/powerOff`
+        url: `/vApp/vapp-${vappUuid(vAppId)}/power/action/powerOff`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -709,7 +730,7 @@ export class ZettagridClient {
 </UndeployVAppParams>`;
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vapp-${vappId}/action/undeploy`,
+        url: `/vApp/vapp-${vappUuid(vappId)}/action/undeploy`,
         data: payload,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' }
       }, zoneId);
@@ -736,7 +757,8 @@ export class ZettagridClient {
     try {
       const params: Record<string, string> = { type: 'vm' };
       
-      if (vAppId) params.filter = `container==${vAppId}`;
+      // VCD query filter requires bare UUID — passing a full URN silently returns 0 results
+      if (vAppId) params.filter = `container==${vappUuid(vAppId)}`;
       if (pagination) {
         if (pagination.page) params.page = pagination.page.toString();
         if (pagination.pageSize) params.pageSize = pagination.pageSize.toString();
@@ -793,7 +815,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'GET',
-        url: `/vApp/vm-${vmId}`
+        url: `/vApp/vm-${vmUuid(vmId)}`
       }, zoneId);
 
       // parseVmDetails extracts root attributes + CPU/RAM/IP from child XML elements
@@ -817,7 +839,7 @@ export class ZettagridClient {
     try {
       const getResp = await this.makeRequest<string>({
         method: 'GET',
-        url: `/vApp/vm-${vmId}/guestCustomizationSection`
+        url: `/vApp/vm-${vmUuid(vmId)}/guestCustomizationSection`
       }, zoneId);
 
       const currentXml = getResp.data as unknown as string;
@@ -827,7 +849,7 @@ export class ZettagridClient {
 
       const putResp = await this.makeRequest<string>({
         method: 'PUT',
-        url: `/vApp/vm-${vmId}/guestCustomizationSection`,
+        url: `/vApp/vm-${vmUuid(vmId)}/guestCustomizationSection`,
         data: updatedXml,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.guestCustomizationSection+xml' }
       }, zoneId);
@@ -852,7 +874,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/power/action/powerOn`
+        url: `/vApp/vm-${vmUuid(vmId)}/power/action/powerOn`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -871,7 +893,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/power/action/powerOff`
+        url: `/vApp/vm-${vmUuid(vmId)}/power/action/powerOff`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -890,7 +912,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/power/action/shutdown`
+        url: `/vApp/vm-${vmUuid(vmId)}/power/action/shutdown`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -909,7 +931,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/power/action/reboot`
+        url: `/vApp/vm-${vmUuid(vmId)}/power/action/reboot`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -928,7 +950,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/power/action/suspend`
+        url: `/vApp/vm-${vmUuid(vmId)}/power/action/suspend`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -948,7 +970,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/screen/action/acquireTicket`
+        url: `/vApp/vm-${vmUuid(vmId)}/screen/action/acquireTicket`
       }, zoneId);
 
       const parsed = parseEntityAttributes(response.data, /<(\w+:)?ScreenTicket\b[^>]*>/);
@@ -1386,7 +1408,9 @@ export class ZettagridClient {
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.instantiateVAppTemplateParams+xml' }
       }, zoneId);
 
-      // Response is the new VApp entity XML — extract key fields
+      // Response is the new VApp entity XML — extract key fields.
+      // VCD returns HTTP 201 with the VApp XML body; the VApp's own href gives vappId.
+      // An embedded <Task> tracks background configuration — callers MUST poll it before using the vApp.
       const vappXml  = response.data;
       const vappHref = (vappXml.match(/href="([^"]+\/vApp\/vapp-[^"]+)"/) || [])[1] || '';
       const vmHref   = (vappXml.match(/href="([^"]+\/vApp\/vm-[^"]+)"/) || [])[1] || '';
@@ -1395,8 +1419,11 @@ export class ZettagridClient {
       const resolvedName = (vappXml.match(/<(\w+:)?VApp\b[^>]*name="([^"]+)"/) || [])[2] || vappName;
       const taskHref = (vappXml.match(/<Task\b[^>]*href="([^"]+)"/) || [])[1] || '';
       const taskStatus = (vappXml.match(/<Task\b[^>]*status="([^"]+)"/) || [])[1] || '';
+      // Expose bare taskId at top level so callers can poll with get_task without parsing the href
+      const taskId   = taskHref.split('/task/')[1] || '';
       return this.formatMcpResponse(
         { vappId, vmId, vappName: resolvedName, vappHref, vmHref,
+          taskId,
           task: { href: taskHref, status: taskStatus },
           ...(autoConfigured ? { autoConfigured } : {})
         },
@@ -1499,7 +1526,7 @@ export class ZettagridClient {
 
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vapp-${vappId}/action/recomposeVApp`,
+        url: `/vApp/vapp-${vappUuid(vappId)}/action/recomposeVApp`,
         data: payload,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.recomposeVAppParams+xml' }
       }, zoneId);
@@ -2117,7 +2144,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'GET',
-        url: `/vApp/vm-${vmId}/snapshotSection`
+        url: `/vApp/vm-${vmUuid(vmId)}/snapshotSection`
       }, zoneId);
 
       const xmlData = response.data;
@@ -2150,7 +2177,7 @@ export class ZettagridClient {
 <CreateSnapshotParams xmlns="http://www.vmware.com/vcloud/v1.5" name="${snapshotName || 'snapshot'}" memory="false" quiesce="false" />`;
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/action/createSnapshot`,
+        url: `/vApp/vm-${vmUuid(vmId)}/action/createSnapshot`,
         data: payload,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.createSnapshotParams+xml' }
       }, zoneId);
@@ -2171,7 +2198,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/snapshot/action/revertToCurrentSnapshot`
+        url: `/vApp/vm-${vmUuid(vmId)}/action/revertToCurrentSnapshot`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -2190,7 +2217,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/snapshot/action/removeAllSnapshots`
+        url: `/vApp/vm-${vmUuid(vmId)}/action/removeAllSnapshots`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -2416,7 +2443,7 @@ export class ZettagridClient {
     try {
       const response = await this.makeRequest<string>({
         method: 'POST',
-        url: `/vApp/vm-${vmId}/power/action/reset`
+        url: `/vApp/vm-${vmUuid(vmId)}/power/action/reset`
       }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
@@ -2440,7 +2467,7 @@ export class ZettagridClient {
       try {
         const cpuXml = await this.makeRequest<string>({
           method: 'GET',
-          url: `/vApp/vm-${vmId}/virtualHardwareSection/cpu`,
+          url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/cpu`,
         }, zoneId);
         const cpsMatch = /<vmw:CoresPerSocket[^>]*>(\d+)<\/vmw:CoresPerSocket>/.exec(cpuXml.data);
         const vqMatch = /<rasd:VirtualQuantity>(\d+)<\/rasd:VirtualQuantity>/.exec(cpuXml.data);
@@ -2454,7 +2481,7 @@ export class ZettagridClient {
 
       // Block CPU reduction on a powered-on VM — vSphere supports hot-add only, not hot-remove.
       if (currentCpuCount > 0 && cpuCount < currentCpuCount) {
-        const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmId}` }, zoneId);
+        const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmUuid(vmId)}` }, zoneId);
         const isPoweredOn = /\bstatus="4"/.test(vmResp.data as unknown as string);
         if (isPoweredOn) {
           return this.formatMcpResponse({}, zone, {
@@ -2479,7 +2506,7 @@ export class ZettagridClient {
 </Item>`;
       const response = await this.makeRequest<string>({
         method: 'PUT',
-        url: `/vApp/vm-${vmId}/virtualHardwareSection/cpu`,
+        url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/cpu`,
         data: cpuPayload,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItem+xml' }
       }, zoneId);
@@ -2504,7 +2531,7 @@ export class ZettagridClient {
         // GET current capabilities to preserve MemoryHotAddEnabled
         const capsResp = await this.makeRequest<string>({
           method: 'GET',
-          url: `/vApp/vm-${vmId}/vmCapabilities`,
+          url: `/vApp/vm-${vmUuid(vmId)}/vmCapabilities`,
         }, zoneId);
         const memHotAdd = /<MemoryHotAddEnabled>(true|false)<\/MemoryHotAddEnabled>/.exec(capsResp.data)?.[1] ?? 'false';
 
@@ -2516,12 +2543,24 @@ export class ZettagridClient {
   <MemoryHotAddEnabled>${memHotAdd}</MemoryHotAddEnabled>
   <CpuHotAddEnabled>${cpuHotAdd}</CpuHotAddEnabled>
 </VmCapabilities>`;
-        await this.makeRequest<string>({
+        const capsUpdateResp = await this.makeRequest<string>({
           method: 'PUT',
-          url: `/vApp/vm-${vmId}/vmCapabilities`,
+          url: `/vApp/vm-${vmUuid(vmId)}/vmCapabilities`,
           data: capsPayload,
           headers: { 'Content-Type': 'application/vnd.vmware.vcloud.vmCapabilitiesSection+xml' }
         }, zoneId);
+        // Wait for vmCapabilities task (VCD returns HTTP 202 with a Task)
+        const capsTaskResult = parseTaskResponse(capsUpdateResp.data);
+        if (capsTaskResult.taskId) {
+          const capsDeadline = Date.now() + 120_000;
+          while (Date.now() < capsDeadline) {
+            await new Promise(r => setTimeout(r, 3000));
+            const t = await this.getTask(capsTaskResult.taskId, zoneId);
+            const s = t.data?.taskStatus;
+            if (s === 'success') break;
+            if (s === 'error' || s === 'aborted') throw new Error(`vmCapabilities task ${capsTaskResult.taskId} ended with status=${s}`);
+          }
+        }
       }
 
       return this.formatMcpResponse(
@@ -2547,11 +2586,11 @@ export class ZettagridClient {
       // Guards for powered-on VMs: check state once, apply all rules.
       const THREE_GB_MB = 3072;
       {
-        const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmId}` }, zoneId);
+        const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmUuid(vmId)}` }, zoneId);
         const isPoweredOn = /\bstatus="4"/.test(vmResp.data as unknown as string);
         if (isPoweredOn) {
           const memResp = await this.makeRequest<string>({
-            method: 'GET', url: `/vApp/vm-${vmId}/virtualHardwareSection/memory`
+            method: 'GET', url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/memory`
           }, zoneId);
           const currentMemMatch = /<rasd:VirtualQuantity>(\d+)<\/rasd:VirtualQuantity>/.exec(memResp.data as unknown as string);
           const currentMemMB = currentMemMatch?.[1] ? parseInt(currentMemMatch[1], 10) : 0;
@@ -2593,7 +2632,7 @@ export class ZettagridClient {
 </Item>`;
       const response = await this.makeRequest<string>({
         method: 'PUT',
-        url: `/vApp/vm-${vmId}/virtualHardwareSection/memory`,
+        url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/memory`,
         data: payload,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItem+xml' }
       }, zoneId);
@@ -2613,7 +2652,7 @@ export class ZettagridClient {
           }
         }
         // GET current capabilities to preserve CpuHotAddEnabled
-        const capsResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmId}/vmCapabilities` }, zoneId);
+        const capsResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${vmUuid(vmId)}/vmCapabilities` }, zoneId);
         const cpuHotAdd = /<CpuHotAddEnabled>(true|false)<\/CpuHotAddEnabled>/.exec(capsResp.data)?.[1] ?? 'false';
         const capsPayload = `<?xml version="1.0" encoding="UTF-8"?>
 <VmCapabilities xmlns="http://www.vmware.com/vcloud/v1.5"
@@ -2623,7 +2662,19 @@ export class ZettagridClient {
   <MemoryHotAddEnabled>${memoryHotAdd}</MemoryHotAddEnabled>
   <CpuHotAddEnabled>${cpuHotAdd}</CpuHotAddEnabled>
 </VmCapabilities>`;
-        await this.makeRequest<string>({ method: 'PUT', url: `/vApp/vm-${vmId}/vmCapabilities`, data: capsPayload, headers: { 'Content-Type': 'application/vnd.vmware.vcloud.vmCapabilitiesSection+xml' } }, zoneId);
+        const capsUpdateResp2 = await this.makeRequest<string>({ method: 'PUT', url: `/vApp/vm-${vmUuid(vmId)}/vmCapabilities`, data: capsPayload, headers: { 'Content-Type': 'application/vnd.vmware.vcloud.vmCapabilitiesSection+xml' } }, zoneId);
+        // Wait for vmCapabilities task (VCD returns HTTP 202 with a Task)
+        const capsTaskResult2 = parseTaskResponse(capsUpdateResp2.data);
+        if (capsTaskResult2.taskId) {
+          const capsDeadline2 = Date.now() + 120_000;
+          while (Date.now() < capsDeadline2) {
+            await new Promise(r => setTimeout(r, 3000));
+            const t = await this.getTask(capsTaskResult2.taskId, zoneId);
+            const s = t.data?.taskStatus;
+            if (s === 'success') break;
+            if (s === 'error' || s === 'aborted') throw new Error(`vmCapabilities task ${capsTaskResult2.taskId} ended with status=${s}`);
+          }
+        }
       }
 
       return this.formatMcpResponse(
@@ -2648,7 +2699,7 @@ export class ZettagridClient {
     try {
       const getResp = await this.makeRequest<string>({
         method: 'GET',
-        url: `/vApp/vm-${vmId}/virtualHardwareSection/disks`
+        url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/disks`
       }, zoneId);
       const xml = getResp.data as unknown as string;
       // Scan individual <Item>...</Item> blocks to avoid cross-block regex spanning
@@ -2689,7 +2740,7 @@ export class ZettagridClient {
 
       const putResp = await this.makeRequest<string>({
         method: 'PUT',
-        url: `/vApp/vm-${vmId}/virtualHardwareSection/disks`,
+        url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/disks`,
         data: updated,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
       }, zoneId);
@@ -2747,7 +2798,7 @@ export class ZettagridClient {
       // DELETE returns 202 with a Task XML body
       const response = await this.makeRequest<string>({
         method: 'DELETE',
-        url: `/vApp/vapp-${vappId}`
+        url: `/vApp/vapp-${vappUuid(vappId)}`
       }, zoneId);
       const task = response.data ? parseTaskResponse(response.data) : { _status: 'accepted' };
       return this.formatMcpResponse(
@@ -2783,7 +2834,7 @@ export class ZettagridClient {
     try {
       const getResp = await this.makeRequest<string>({
         method: 'GET',
-        url: `/vApp/vm-${vmId}/networkConnectionSection`
+        url: `/vApp/vm-${vmUuid(vmId)}/networkConnectionSection`
       }, zoneId);
 
       let xml = getResp.data as unknown as string;
@@ -2850,7 +2901,7 @@ export class ZettagridClient {
 
       const putResp = await this.makeRequest<string>({
         method: 'PUT',
-        url: `/vApp/vm-${vmId}/networkConnectionSection`,
+        url: `/vApp/vm-${vmUuid(vmId)}/networkConnectionSection`,
         data: xml,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.networkConnectionSection+xml' }
       }, zoneId);

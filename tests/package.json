@@ -1,0 +1,26 @@
+{
+  "name": "vcd-mcp-tests",
+  "version": "1.0.0",
+  "description": "QA regression test suite for VMware Cloud Director MCP Server — PT Arupa Cloud Nusantara",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "test":          "jest --runInBand --forceExit",
+    "test:vm":       "jest --runInBand --forceExit --testPathPattern=vm-lifecycle",
+    "test:vapp":     "jest --runInBand --forceExit --testPathPattern=vapp-catalog",
+    "test:network":  "jest --runInBand --forceExit --testPathPattern=networking",
+    "test:monitor":  "jest --runInBand --forceExit --testPathPattern=monitoring",
+    "test:snapshot": "jest --runInBand --forceExit --testPathPattern=snapshot"
+  },
+  "jest": {
+    "testTimeout": 300000,
+    "verbose": true,
+    "testEnvironment": "node",
+    "globalSetup": "./jest.globalSetup.js",
+    "globalTeardown": "./jest.globalTeardown.js",
+    "testMatch": ["**/tests/**/*.test.js"]
+  },
+  "devDependencies": {
+    "jest": "^30.4.2"
+  }
+}
