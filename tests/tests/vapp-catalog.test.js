@@ -111,8 +111,8 @@ describe('UC-VA-001 — Deploy a vApp from Catalog Template', () => {
     created.vappId = get(result, 'data', 'vappId') || get(result, 'data', 'id') || get(result, 'vappId') || get(result, 'id');
 
     // Fallback: if vappId not in response (regex miss on VCD XML), search by name
-    if (!created.vappId) {
-      await new Promise(r => setTimeout(r, 3000));
+    if (!created.vappId && result?.success !== false) {
+      await new Promise(r => setTimeout(r, 5000));
       const vapps = toArray(await client.call('list_vapps', {}));
       const found = vapps.find(v => v.name === vappName);
       if (found) {
@@ -121,9 +121,9 @@ describe('UC-VA-001 — Deploy a vApp from Catalog Template', () => {
       }
     }
 
-    log.result(UC, `create_vapp "${vappName}"`, !!created.vappId || !!result,
-      `vappId=${created.vappId}`);
-    expect(result).toBeTruthy();
+    const isSuccess = result?.success !== false && !!created.vappId;
+    log.result(UC, `create_vapp "${vappName}"`, isSuccess, `vappId=${created.vappId}`);
+    expect(isSuccess).toBe(true);
   });
 
   test('get_vapp confirms vApp exists after deployment', async () => {
@@ -161,7 +161,8 @@ describe('UC-VA-002 — Add VM to Existing vApp from Catalog', () => {
 
   test('add_vm_to_vapp adds a VM into an existing vApp', async () => {
     log.separator(UC + ': add_vm_to_vapp');
-    const vappId = created.vappId || cfg.fixtures.vappIdOff;
+    const vappId = created.vappId;
+    if (!vappId) { log.warn(`${UC}: no vappId from UC-VA-001 — skipping`); return; }
     const result = await client.call('add_vm_to_vapp', {
       vappId,
       templateId,
@@ -176,7 +177,8 @@ describe('UC-VA-002 — Add VM to Existing vApp from Catalog', () => {
 
   test('list_vms shows new VM under the vApp', async () => {
     log.separator(UC + ': list_vms verify');
-    const vappId = created.vappId || cfg.fixtures.vappIdOff;
+    const vappId = created.vappId;
+    if (!vappId) { log.warn(`${UC}: no vappId from UC-VA-001 — skipping`); return; }
     const vms    = toArray(await client.call('list_vms', { vappId }));
     log.result(UC, 'VM added to vApp', vms.length > 0, `vmCount=${vms.length}`);
     expect(vms.length).toBeGreaterThan(0);
@@ -191,8 +193,8 @@ describe('UC-VA-003 — Power On a vApp', () => {
   let targetVappId;
 
   beforeAll(() => {
-    targetVappId = created.vappId || cfg.fixtures.vappIdOff;
-    if (!targetVappId) log.warn(`${UC}: no vappId available — tests will skip`);
+    targetVappId = created.vappId;
+    if (!targetVappId) log.warn(`${UC}: no vappId from UC-VA-001 — all power-on tests will skip`);
   });
 
   test('power_on_vapp transitions vApp to powered-on', async () => {
@@ -302,31 +304,33 @@ describe('UC-VA-005 — Delete a vApp', () => {
   let targetVappId;
 
   beforeAll(() => {
-    targetVappId = created.vappId || cfg.fixtures.vappIdOff;
-    log.info(`${UC}: targeting vApp ${targetVappId} for deletion`);
+    targetVappId = created.vappId;
+    if (!targetVappId) log.warn(`${UC}: no vappId from UC-VA-001 — delete tests will skip`);
   });
 
   test('list_vapps confirms target vApp exists before deletion', async () => {
     log.separator(UC + ': pre-delete list_vapps');
+    if (!targetVappId) { log.warn(`${UC}: no vappId — skipping`); return; }
     const vapps = toArray(await client.call('list_vapps', {}));
     const found = vapps.some(v => (v.id || v.vappId) === targetVappId);
-    log.result(UC, 'vApp exists before delete', found || vapps.length > 0);
-    // If not found it may already be gone — warn but don't fail pre-check
+    log.result(UC, 'vApp exists before delete', found);
     if (!found) log.warn(`vApp ${targetVappId} not found — may have been cleaned up already`);
   });
 
   test('delete_vapp removes the vApp permanently', async () => {
     log.separator(UC + ': delete_vapp');
+    if (!targetVappId) { log.warn(`${UC}: no vappId — skipping`); return; }
     const result = await client.call('delete_vapp', { vappId: targetVappId }, cfg.timeouts.taskPoll);
     const taskId = get(result, 'data', 'taskId') || get(result, 'taskId') || get(result, 'task', 'id');
     if (taskId) await waitForTask(client, taskId, cfg.timeouts.taskPoll);
     log.result(UC, 'delete_vapp completed', true);
-    created.vappId = null;   // mark cleaned up
+    created.vappId = null;
     expect(result).toBeTruthy();
   });
 
   test('list_vapps no longer returns the deleted vApp', async () => {
     log.separator(UC + ': post-delete list_vapps');
+    if (!targetVappId) { log.warn(`${UC}: no vappId — skipping`); return; }
     const vapps = toArray(await client.call('list_vapps', {}));
     const found = vapps.some(v => (v.id || v.vappId) === targetVappId);
     log.result(UC, 'vApp absent after delete', !found);
