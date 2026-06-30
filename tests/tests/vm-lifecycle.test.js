@@ -144,8 +144,8 @@ describe('UC-VM-004 — Reboot a Virtual Machine', () => {
     log.separator(UC + ': verify reboot complete');
     const vm = await waitForVmPower(client, cfg.fixtures.vmIdTools, 'poweredOn', cfg.timeouts.powerOp);
     const state = (vm?.status || vm?.powerState || '').toLowerCase();
-    log.result(UC, 'VM is poweredOn post-reboot', state.includes('poweredon'), `state="${state}"`);
-    expect(state).toMatch(/poweredon|on/i);
+    log.result(UC, 'VM is poweredOn post-reboot', /poweredon|powered_on/.test(state), `state="${state}"`);
+    expect(state).toMatch(/poweredon|powered_on|on/i);
   });
 });
 
@@ -170,8 +170,8 @@ describe('UC-VM-005 — Hard Reset a Virtual Machine', () => {
     log.separator(UC + ': verify post-reset state');
     const vm = await waitForVmPower(client, cfg.fixtures.vmIdOn, 'poweredOn', cfg.timeouts.powerOp);
     const state = (vm?.status || vm?.powerState || '').toLowerCase();
-    log.result(UC, 'VM poweredOn after hard reset', state.includes('poweredon'), `state="${state}"`);
-    expect(state).toMatch(/poweredon|on/i);
+    log.result(UC, 'VM poweredOn after hard reset', /poweredon|powered_on/.test(state), `state="${state}"`);
+    expect(state).toMatch(/poweredon|powered_on|on/i);
   });
 });
 
