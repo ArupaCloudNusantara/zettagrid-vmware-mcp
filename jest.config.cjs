@@ -10,4 +10,7 @@ module.exports = {
   // concurrent VCD operations conflict (task lock errors, snapshot conflicts, etc.).
   // --runInBand guarantees serial in-process execution; maxWorkers alone is insufficient.
   runInBand:       true,
+  // Write structured pass/fail summary to logs/jest-results.log after every run.
+  // Runs alongside the default reporter — does not suppress console output.
+  reporters: ['default', './tests/jest-results-reporter.cjs'],
 };
