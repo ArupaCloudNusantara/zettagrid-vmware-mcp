@@ -813,14 +813,45 @@ export class ZettagridClient {
    */
   async getVM(vmId: string, zoneId?: string): Promise<McpToolResponse<Vm>> {
     try {
-      const response = await this.makeRequest<string>({
-        method: 'GET',
-        url: `/vApp/vm-${vmUuid(vmId)}`
-      }, zoneId);
+      // Fetch entity XML and disk sub-resource in parallel — the sub-resource is authoritative
+      // for current disk sizes after hot-resize (the full entity XML may lag behind).
+      const uuid = vmUuid(vmId);
+      const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+      const [entityResp, diskResp] = await Promise.all([
+        this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId),
+        this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}/virtualHardwareSection/disks` }, zoneId)
+          .catch(() => null),
+      ]);
 
       // parseVmDetails extracts root attributes + CPU/RAM/IP from child XML elements
-      const parsed = parseVmDetails(response.data);
-      return this.formatMcpResponse(parsed as unknown as Vm, zoneId || this.zoneManager.getConfig().defaultZone);
+      const parsed = parseVmDetails(entityResp.data);
+
+      // Override disk info with sub-resource data (avoids stale entity XML after hot-resize).
+      // Uses the same <Item>...</Item> pattern as updateVMDisk — no namespace prefix in this endpoint.
+      if (diskResp) {
+        const diskXml = diskResp.data as unknown as string;
+        const itemPattern = /<Item\b[\s\S]*?<\/Item>/g;
+        const refreshed: Array<{name: string; capacityMB: number; capacityGB: number}> = [];
+        let im: RegExpExecArray | null;
+        let idx = 0;
+        while ((im = itemPattern.exec(diskXml)) !== null) {
+          const item = im[0];
+          const capMatch = /\w+:capacity="(\d+)"/.exec(item);
+          if (!capMatch?.[1]) continue;
+          const capacityMB = parseInt(capMatch[1], 10);
+          if (capacityMB <= 0) continue;
+          const nameMatch = /<rasd:ElementName>(.*?)<\/rasd:ElementName>/.exec(item);
+          refreshed.push({
+            name: nameMatch?.[1] ?? `Hard disk ${idx + 1}`,
+            capacityMB,
+            capacityGB: Math.round(capacityMB / 1024 * 10) / 10,
+          });
+          idx++;
+        }
+        if (refreshed.length > 0) parsed.disks = refreshed;
+      }
+
+      return this.formatMcpResponse(parsed as unknown as Vm, zone);
     } catch (error) {
       return this.formatMcpResponse({} as Vm, zoneId || this.zoneManager.getConfig().defaultZone, {
         code: 'GET_VM_ERROR',
