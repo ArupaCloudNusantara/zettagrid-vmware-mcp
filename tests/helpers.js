@@ -77,7 +77,7 @@ async function waitForVappStatus(client, vappId, expectedStatus, timeoutMs = cfg
     if (wantNorm === 'poweredoff' && stateNorm === 'resolved') return vapp;
     await sleep(cfg.timeouts.taskInterval);
   }
-  throw new Error(`vApp ${vappId} did not reach status "${expectedStatus}" within ${timeoutMs}ms`);
+  throw new Error(`vApp ${vappId} did not reach status "${expectedStatus}" within ${timeoutMs}ms (last seen: "${vapp?.status ?? 'unknown'}")`);
 }
 
 /**

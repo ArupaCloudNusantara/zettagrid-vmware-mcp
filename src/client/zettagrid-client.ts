@@ -2791,20 +2791,35 @@ export class ZettagridClient {
         .replace(/(<rasd:VirtualQuantity>)\d+(<\/rasd:VirtualQuantity>)/, `$1${diskSizeBytes}$2`);
       const updated = xml.replace(diskItem, updatedItem);
 
-      const putResp = await this.makeRequest<string>({
-        method: 'PUT',
-        url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/disks`,
-        data: updated,
-        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
-      }, zoneId);
-      return this.formatMcpResponse(
-        { ...parseTaskResponse(putResp.data), diskSizeMB },
-        zone
-      );
+      try {
+        const putResp = await this.makeRequest<string>({
+          method: 'PUT',
+          url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/disks`,
+          data: updated,
+          headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
+        }, zoneId);
+        return this.formatMcpResponse(
+          { ...parseTaskResponse(putResp.data), diskSizeMB },
+          zone
+        );
+      } catch (legacyErr) {
+        // Legacy PUT rejected (commonly: VM is powered on). Try CloudAPI hot-extend.
+        const vmUrn = vmId.startsWith('urn:') ? vmId : `urn:vcloud:vm:${vmUuid(vmId)}`;
+        const disksData = await this.makeCloudApiRequest<any>('GET', `/vms/${vmUrn}/disks`, zoneId);
+        const disks: any[] = disksData.values ?? [];
+        const primaryDisk = disks.find((d: any) => d.busNumber === 0 && d.unitNumber === 0)
+          ?? (disks.length > 0 ? disks.reduce((a: any, b: any) => ((b.sizeInMb ?? 0) > (a.sizeInMb ?? 0) ? b : a)) : null);
+        if (!primaryDisk) throw legacyErr;
+        const putResult = await this.makeCloudApiRequest<any>(
+          'PUT', `/vms/${vmUrn}/disks/${primaryDisk.id}`, zoneId,
+          { ...primaryDisk, sizeInMb: diskSizeMB }
+        );
+        return this.formatMcpResponse({ ...putResult, diskSizeMB }, zone);
+      }
     } catch (error) {
       return this.formatMcpResponse({}, zone, {
         code: 'UPDATE_VM_DISK_ERROR',
-        message: error instanceof Error ? error.message : 'Failed to resize disk — ensure VM is powered off',
+        message: error instanceof Error ? error.message : 'Failed to resize disk',
         details: error
       });
     }
@@ -3059,8 +3074,8 @@ export class ZettagridClient {
   async deleteApplicationPortProfile(profileId: string, zoneId?: string): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      // VCD CloudAPI DELETE requires UUID-only in the path (same pattern as deleteNatRule)
-      const id = profileId.startsWith('urn:vcloud:') ? profileId.split(':').pop()! : profileId;
+      // VCD CloudAPI DELETE expects full URN in the path (HTTP 400 if only UUID is supplied)
+      const id = profileId.startsWith('urn:vcloud:') ? profileId : `urn:vcloud:applicationPortProfile:${profileId}`;
       await this.makeCloudApiRequest<any>('DELETE', `/applicationPortProfiles/${id}`, zoneId);
       return this.formatMcpResponse({ deleted: true, profileId }, zone);
     } catch (error) {

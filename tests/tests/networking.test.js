@@ -117,6 +117,10 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
 
   test('create_firewall_rule creates a new ALLOW rule', async () => {
     log.separator(UC + ': create_firewall_rule');
+    // Snapshot existing rule IDs before create — used to identify the new rule below
+    const rulesBefore = toArray(await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
+    const existingIds = new Set(rulesBefore.map(r => get(r, 'id') || get(r, 'ruleId')).filter(Boolean));
+
     const ruleName = `qa-test-allow-https-${Date.now()}`;
     const result = await client.call('create_firewall_rule', {
       edgeGatewayId: resolvedEdgeGatewayId,
@@ -127,14 +131,18 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
       portProfiles:  [resolvedAppPortProfileId],
       logging:       false,
     });
+    // CloudAPI returns 202 without ID — poll until the new rule appears (not in pre-create snapshot)
     let ruleId = get(result, 'data', 'id') || get(result, 'data', 'ruleId') || get(result, 'id') || get(result, 'ruleId');
-    // CloudAPI returns 202 without ID — wait briefly then find the rule by name
     if (!ruleId) {
-      await new Promise(r => setTimeout(r, 2000));
-      const rules = toArray(await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
-      const found = rules.find(r => r.name === ruleName || r.displayName === ruleName);
-      if (found) ruleId = get(found, 'id') || get(found, 'ruleId');
-      log.debug(`Firewall rule list lookup: found=${JSON.stringify(found)}`);
+      for (let i = 0; i < 6; i++) {
+        await new Promise(r => setTimeout(r, 1000));
+        const rules = toArray(await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
+        const newRule = rules.find(r => {
+          const rid = get(r, 'id') || get(r, 'ruleId');
+          return rid && !existingIds.has(rid);
+        });
+        if (newRule) { ruleId = get(newRule, 'id') || get(newRule, 'ruleId'); break; }
+      }
     }
     created.firewallRuleId   = ruleId;
     created.firewallRuleName = ruleName;
@@ -309,6 +317,7 @@ describe('UC-NET-005 — Delete a NAT Rule', () => {
 // ─── UC-NET-006: Application Port Profile CRUD ────────────────────────────
 describe('UC-NET-006 — Create and Delete an Application Port Profile', () => {
   const UC = 'UC-NET-006';
+  let createdProfileName = null;
 
   test('list_application_port_profiles returns existing profiles', async () => {
     log.separator(UC + ': list_application_port_profiles');
@@ -327,12 +336,12 @@ describe('UC-NET-006 — Create and Delete an Application Port Profile', () => {
     const contextEntityId = resolvedVdcId.startsWith('urn:vcloud:')
       ? resolvedVdcId
       : `urn:vcloud:vdc:${resolvedVdcId}`;
+    createdProfileName = `qa-port-profile-${Date.now()}`;
     const result = await client.call('create_application_port_profile', {
-      name:            `qa-port-profile-${Date.now()}`,
+      name:            createdProfileName,
       contextEntityId,
       ports:           [{ protocol: 'TCP', destinationPorts: ['9000'] }],
     });
-    // create returns empty data — must call list to get the URN
     log.debug(`create_application_port_profile: ${JSON.stringify(result)}`);
     log.result(UC, 'create accepted', get(result, 'success') !== false);
     expect(get(result, 'success')).not.toBe(false);
@@ -340,12 +349,23 @@ describe('UC-NET-006 — Create and Delete an Application Port Profile', () => {
 
   test('list_application_port_profiles (TENANT) includes newly created profile', async () => {
     log.separator(UC + ': list TENANT profiles to find new one');
-    const result   = await client.call('list_application_port_profiles', { filter: 'tenant' });
-    const profiles = toArray(result);
+    // Poll until the newly created profile (by exact name) appears in TENANT list
+    let profiles = [];
+    let profile = null;
+    for (let i = 0; i < 5; i++) {
+      if (i > 0) await new Promise(r => setTimeout(r, 1000));
+      const result = await client.call('list_application_port_profiles', { filter: 'tenant' });
+      profiles = toArray(result);
+      if (createdProfileName) {
+        profile = profiles.find(p => p.name === createdProfileName);
+        if (profile) break;
+      }
+    }
+    // Fallback: first qa-port-profile-* (legacy behaviour)
+    if (!profile && createdProfileName) profile = profiles.find(p => (p.name || '').startsWith('qa-port-profile-'));
+    if (!profile) profile = profiles[0];
     log.result(UC, 'TENANT profile list returned', profiles.length > 0, `count=${profiles.length}`);
     expect(profiles.length).toBeGreaterThan(0);
-    // Capture the most-recently created profile for deletion
-    const profile = profiles.find(p => (p.name || '').startsWith('qa-port-profile-')) || profiles[0];
     created.portProfileId = get(profile, 'id') || get(profile, 'profileId');
     log.info(`Using portProfileId=${created.portProfileId} for delete test`);
     expect(created.portProfileId).toBeTruthy();
@@ -357,9 +377,10 @@ describe('UC-NET-006 — Create and Delete an Application Port Profile', () => {
     const result = await client.call('delete_application_port_profile', {
       profileId: created.portProfileId,
     });
-    log.result(UC, 'delete accepted', get(result, 'success') !== false);
+    const deleteOk = get(result, 'success') !== false;
+    log.result(UC, 'delete accepted', deleteOk, deleteOk ? '' : `err=${JSON.stringify(result?.error || result).slice(0,400)}`);
     created.portProfileId = null;
-    expect(get(result, 'success')).not.toBe(false);
+    expect(deleteOk).toBe(true);
   });
 
   test('deleted profile no longer appears in TENANT list', async () => {

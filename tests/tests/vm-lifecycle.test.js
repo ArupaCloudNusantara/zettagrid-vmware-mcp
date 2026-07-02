@@ -526,8 +526,9 @@ describe('UC-VM-014 — Disk Extend While VM is Powered On', () => {
     const result = await client.call('update_vm_disk', { vmId, diskSizeMB: newDiskMB });
     const taskId = get(result, 'data', 'taskId') || get(result, 'taskId');
     if (taskId) await waitForTask(client, taskId);
-    log.result(UC, `disk extended to ${newDiskMB} MB while powered on`, get(result, 'success') !== false);
-    expect(get(result, 'success')).not.toBe(false);
+    const extOk = get(result, 'success') !== false;
+    log.result(UC, `disk extended to ${newDiskMB} MB while powered on`, extOk, extOk ? '' : `err=${JSON.stringify(result?.error || '').slice(0,300)}`);
+    expect(extOk).toBe(true);
   });
 
   test('get_vm reflects updated disk size', async () => {

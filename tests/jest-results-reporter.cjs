@@ -7,8 +7,9 @@
 const fs   = require('fs');
 const path = require('path');
 
-const LOG_DIR     = path.resolve(__dirname, '../logs');
-const RESULT_FILE = path.join(LOG_DIR, 'jest-results.log');
+const LOG_DIR   = path.resolve(__dirname, '../logs');
+const timestamp = new Date().toISOString().replace(/:/g, '-').slice(0, 19);
+const RESULT_FILE = path.join(LOG_DIR, `jest-results-${timestamp}.log`);
 
 class ResultsReporter {
   onRunComplete(_contexts, results) {

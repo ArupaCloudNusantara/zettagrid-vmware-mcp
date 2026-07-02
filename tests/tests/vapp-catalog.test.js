@@ -97,8 +97,8 @@ describe('UC-VA-001 — Deploy a vApp from Catalog Template', () => {
       match = items[0];
       log.warn(`${UC}: no vApp template found — falling back to first catalog item: ${match?.name}`);
     }
-    // create_vapp needs the full href, NOT the bare UUID
-    templateId = match?.href || match?.id || match?.templateId;
+    // create_vapp needs the vApp template href (entityHref), NOT the catalogItem href
+    templateId = match?.entityHref || match?.href || match?.id || match?.templateId;
     log.result(UC, 'list_catalog_items', !!templateId, `count=— template=${match?.name} (${templateId})`);
     expect(templateId).toBeTruthy();
   });
@@ -169,8 +169,8 @@ describe('UC-VA-002 — Add VM to Existing vApp from Catalog', () => {
       if (match) break;
     }
     if (!match) match = toArray(await client.call('list_catalog_items', { catalogId: cats[0].id || cats[0].catalogId }))[0];
-    // add_vm_to_vapp also requires the full template href
-    templateId = match?.href || match?.id || match?.templateId;
+    // add_vm_to_vapp also requires the vApp template href (entityHref), not catalogItem href
+    templateId = match?.entityHref || match?.href || match?.id || match?.templateId;
     log.result(UC, 'template found', !!templateId, `templateId=${templateId}`);
     expect(templateId).toBeTruthy();
   });
@@ -267,7 +267,8 @@ describe('UC-VA-004 — Power Off a vApp', () => {
 
   test('get_vapp status is Powered Off within timeout', async () => {
     log.separator(UC + ': verify vApp status');
-    const vapp   = await waitForVappStatus(client, cfg.fixtures.vappIdOn, 'Powered Off');
+    // Ubuntu 22.04 graceful shutdown can take 4-8 minutes — use 10m timeout
+    const vapp   = await waitForVappStatus(client, cfg.fixtures.vappIdOn, 'Powered Off', 600_000);
     const status = vapp?.status || '';
     log.result(UC, 'vApp Powered Off', status.toLowerCase().includes('off'), `status="${status}"`);
     expect(status).toMatch(/powered.?off|stopped/i);
