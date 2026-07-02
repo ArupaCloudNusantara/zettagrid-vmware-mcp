@@ -828,10 +828,11 @@ export class ZettagridClient {
 
       // Override disk info with sub-resource data (avoids stale entity XML after hot-resize).
       // Uses the same <Item>...</Item> pattern as updateVMDisk — no namespace prefix in this endpoint.
+      // Sort: InstanceID 2000 (standard VCD boot disk) first so disks[0] matches updateVMDisk's target.
       if (diskResp) {
         const diskXml = diskResp.data as unknown as string;
         const itemPattern = /<Item\b[\s\S]*?<\/Item>/g;
-        const refreshed: Array<{name: string; capacityMB: number; capacityGB: number}> = [];
+        const parsed_disks: Array<{instanceId: string; name: string; capacityMB: number; capacityGB: number}> = [];
         let im: RegExpExecArray | null;
         let idx = 0;
         while ((im = itemPattern.exec(diskXml)) !== null) {
@@ -841,13 +842,22 @@ export class ZettagridClient {
           const capacityMB = parseInt(capMatch[1], 10);
           if (capacityMB <= 0) continue;
           const nameMatch = /<rasd:ElementName>(.*?)<\/rasd:ElementName>/.exec(item);
-          refreshed.push({
+          const idMatch   = /<rasd:InstanceID>(\d+)<\/rasd:InstanceID>/.exec(item);
+          parsed_disks.push({
+            instanceId: idMatch?.[1] ?? '9999',
             name: nameMatch?.[1] ?? `Hard disk ${idx + 1}`,
             capacityMB,
             capacityGB: Math.round(capacityMB / 1024 * 10) / 10,
           });
           idx++;
         }
+        // InstanceID 2000 first; remaining by capacity descending
+        parsed_disks.sort((a, b) => {
+          if (a.instanceId === '2000') return -1;
+          if (b.instanceId === '2000') return 1;
+          return b.capacityMB - a.capacityMB;
+        });
+        const refreshed = parsed_disks.map(({ name, capacityMB, capacityGB }) => ({ name, capacityMB, capacityGB }));
         if (refreshed.length > 0) parsed.disks = refreshed;
       }
 
@@ -2743,9 +2753,21 @@ export class ZettagridClient {
           break;
         }
       }
+      // Fallback: use disk with largest capacity (covers templates with non-standard InstanceIDs)
+      if (!diskItem) {
+        let maxCap = 0;
+        itemPattern.lastIndex = 0;
+        while ((im = itemPattern.exec(xml)) !== null) {
+          const capM = /\w+:capacity="(\d+)"/.exec(im[0]);
+          if (capM?.[1]) {
+            const cap = parseInt(capM[1], 10);
+            if (cap > maxCap) { maxCap = cap; diskItem = im[0]; }
+          }
+        }
+      }
       if (!diskItem) {
         const ids = [...xml.matchAll(/<rasd:InstanceID>(\d+)<\/rasd:InstanceID>/g)].map(x => x[1]);
-        throw new Error(`Disk InstanceID 2000 not found. Present IDs: [${ids.join(', ')}]`);
+        throw new Error(`No disk item found in virtualHardwareSection/disks. Present IDs: [${ids.join(', ')}]`);
       }
 
       // Block shrink — vCD/vSphere does not support decreasing disk size
@@ -3037,8 +3059,8 @@ export class ZettagridClient {
   async deleteApplicationPortProfile(profileId: string, zoneId?: string): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      // vCD CloudAPI expects the full URN in the path
-      const id = profileId.startsWith('urn:vcloud:') ? profileId : `urn:vcloud:applicationPortProfile:${profileId}`;
+      // VCD CloudAPI DELETE requires UUID-only in the path (same pattern as deleteNatRule)
+      const id = profileId.startsWith('urn:vcloud:') ? profileId.split(':').pop()! : profileId;
       await this.makeCloudApiRequest<any>('DELETE', `/applicationPortProfiles/${id}`, zoneId);
       return this.formatMcpResponse({ deleted: true, profileId }, zone);
     } catch (error) {

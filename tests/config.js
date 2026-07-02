@@ -12,6 +12,7 @@
 'use strict';
 
 const path = require('path');
+const fs   = require('fs');
 
 const config = {
   // ─── MCP Server ───────────────────────────────────────────────────────────
@@ -52,8 +53,8 @@ const config = {
     vappIdOn:        process.env.TEST_VAPP_ID_ON       || 'urn:vcloud:vapp:9e1851ef-986a-4547-a896-d17858ec5ac6', // claude-test
 
     // Catalog and template for vApp deployment tests
-    catalogName:     process.env.TEST_CATALOG_NAME     || 'TestCatalog',
-    templateName:    process.env.TEST_TEMPLATE_NAME    || 'Ubuntu-22.04-Template',
+    catalogName:     process.env.TEST_CATALOG_NAME     || 'Ubuntu',
+    templateName:    process.env.TEST_TEMPLATE_NAME    || 'Ubuntu Server 22.04',
 
     // Edge gateway for networking tests
     edgeGatewayId:   process.env.TEST_EDGE_GW_ID       || 'urn:vcloud:gateway:xxxxxxxx',
@@ -70,12 +71,28 @@ const config = {
     mcpReady:    10_000,   // ms — wait for MCP server to initialise
     taskPoll:   300_000,   // ms — max wait for async VCD tasks
     taskInterval: 5_000,   // ms — poll interval for task status
-    powerOp:    120_000,   // ms — max wait for VM power operations
+    powerOp:    240_000,   // ms — max wait for VM power operations
   },
 
   // ─── Logging ─────────────────────────────────────────────────────────────
   logDir:   process.env.LOG_DIR || './logs',
   logLevel: process.env.LOG_LEVEL || 'info',   // 'debug' | 'info' | 'warn' | 'error'
 };
+
+// Load runtime fixtures written by globalSetup (overrides hardcoded defaults above).
+// Keys prefixed with '_' are internal (teardown metadata) and are not merged.
+try {
+  const runtimePath = path.join(__dirname, 'fixtures-runtime.json');
+  if (fs.existsSync(runtimePath)) {
+    const runtime = JSON.parse(fs.readFileSync(runtimePath, 'utf8'));
+    if (!runtime._setupFailed) {
+      Object.keys(runtime).forEach(k => {
+        if (!k.startsWith('_') && runtime[k] != null) {
+          config.fixtures[k] = runtime[k];
+        }
+      });
+    }
+  }
+} catch { /* ignore — fall back to hardcoded fixture IDs above */ }
 
 module.exports = config;

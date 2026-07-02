@@ -66,14 +66,30 @@ describe('UC-VA-001 — Deploy a vApp from Catalog Template', () => {
     // create_vapp requires the full template href (not bare ID) in its Source element.
     // entityType is the VCD field that distinguishes vApp templates from ISOs/media.
     const cats = toArray(await client.call('list_catalogs', {}));
-    let match;
+    // Cache items per catalog to avoid double API calls
+    const catItems = {};
     for (const cat of cats) {
       const cid = cat.id || cat.catalogId;
-      const items = toArray(await client.call('list_catalog_items', { catalogId: cid }));
-      // Prefer explicit name match; otherwise any vApp template by entityType
-      match = items.find(i => i.name === cfg.fixtures.templateName)
-           || items.find(i => (i.entityType || '').toLowerCase().includes('vapptemplate'));
-      if (match) { catalogId = cid; break; }
+      catItems[cid] = toArray(await client.call('list_catalog_items', { catalogId: cid }));
+    }
+    let match;
+    // Pass 1: exact name match across ALL catalogs (avoids picking wrong template from first catalog)
+    for (const cat of cats) {
+      const cid = cat.id || cat.catalogId;
+      const exact = catItems[cid].find(i => i.name === cfg.fixtures.templateName);
+      if (exact) { match = exact; catalogId = cid; break; }
+    }
+    // Pass 2: any vApp template (prefer configured catalog name, then others)
+    if (!match) {
+      const ordered = [
+        ...cats.filter(c => c.name === cfg.fixtures.catalogName),
+        ...cats.filter(c => c.name !== cfg.fixtures.catalogName),
+      ];
+      for (const cat of ordered) {
+        const cid = cat.id || cat.catalogId;
+        const fb = catItems[cid].find(i => (i.entityType || '').toLowerCase().includes('vapptemplate'));
+        if (fb) { match = fb; catalogId = cid; break; }
+      }
     }
     // Final fallback — use first item from original catalog (may be ISO, test will warn)
     if (!match) {
