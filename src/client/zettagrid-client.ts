@@ -2858,16 +2858,16 @@ export class ZettagridClient {
           return this.formatMcpResponse({ ...putResult, diskSizeMB }, zone);
         } catch {
           // Strategy 3: Power off → extend → power on (VMs without hot-extend on older VCD)
-          await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOff` }, zoneId)
-            .catch(() => {}); // no-op if already powered off
+          await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOff` }, zoneId);
           let poweredOff = false;
-          const offDeadline = Date.now() + 60_000;
+          const offDeadline = Date.now() + 120_000;
           while (Date.now() < offDeadline) {
-            await new Promise(r => setTimeout(r, 2000));
+            await new Promise(r => setTimeout(r, 3000));
+            if (Date.now() >= offDeadline) break;
             const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId);
             if ((vmResp.data as unknown as string).includes('status="8"')) { poweredOff = true; break; }
           }
-          if (!poweredOff) throw new Error('VM did not power off within 60s for disk extend');
+          if (!poweredOff) throw new Error('VM did not power off within 120s for disk extend');
           const getResp2 = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}/virtualHardwareSection/disks` }, zoneId);
           const xml2 = getResp2.data as unknown as string;
           const diskItem2 = findDiskItem(xml2);
