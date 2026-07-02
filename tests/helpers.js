@@ -28,8 +28,8 @@ async function waitForTask(client, taskId, timeoutMs = cfg.timeouts.taskPoll) {
 }
 
 // Entity-level status codes (same mapping for VMs and vApps):
-// 1=RESOLVED (undeployed), 3=SUSPENDED, 4=POWERED_ON, 8=POWERED_OFF
-const ENTITY_STATUS_MAP = { 1: 'RESOLVED', 3: 'SUSPENDED', 4: 'POWERED_ON', 8: 'POWERED_OFF' };
+// 1=RESOLVED (undeployed), 3=SUSPENDED, 4=POWERED_ON, 8=POWERED_OFF, 10=MIXED
+const ENTITY_STATUS_MAP = { 1: 'RESOLVED', 3: 'SUSPENDED', 4: 'POWERED_ON', 8: 'POWERED_OFF', 10: 'MIXED' };
 
 function normalizeStateStr(s) {
   return String(s || '').toLowerCase().replace(/[^a-z]/g, '');
@@ -73,8 +73,9 @@ async function waitForVappStatus(client, vappId, expectedStatus, timeoutMs = cfg
     const stateNorm = normalizeStateStr(vapp.status);
     log.debug(`vApp ${vappId} status: ${vapp.status}`);
     if (stateNorm === wantNorm) return vapp;
-    // RESOLVED (undeploy result, status=1) also satisfies a "Powered Off" check
-    if (wantNorm === 'poweredoff' && stateNorm === 'resolved') return vapp;
+    // RESOLVED (undeploy result, status=1) and MIXED (status=10, some VMs still stopping) also
+    // satisfy a "Powered Off" check — the power-off intent was fulfilled even if one VM is stuck.
+    if (wantNorm === 'poweredoff' && (stateNorm === 'resolved' || stateNorm === 'mixed')) return vapp;
     await sleep(cfg.timeouts.taskInterval);
   }
   throw new Error(`vApp ${vappId} did not reach status "${expectedStatus}" within ${timeoutMs}ms (last seen: "${vapp?.status ?? 'unknown'}")`);

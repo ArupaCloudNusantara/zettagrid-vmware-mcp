@@ -723,28 +723,50 @@ export class ZettagridClient {
    * UndeployPowerAction=powerOff forcibly shuts down any running VMs first.
    */
   async undeployVApp(vappId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    const uuid = vappUuid(vappId);
+    const makeUndeployPayload = (action: string) =>
+      `<?xml version="1.0" encoding="UTF-8"?>\n<UndeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">\n  <UndeployPowerAction>${action}</UndeployPowerAction>\n</UndeployVAppParams>`;
+
+    // Strategy 1: standard force powerOff + undeploy
     try {
-      const payload = `<?xml version="1.0" encoding="UTF-8"?>
-<UndeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">
-  <UndeployPowerAction>powerOff</UndeployPowerAction>
-</UndeployVAppParams>`;
       const response = await this.makeRequest<string>({
-        method: 'POST',
-        url: `/vApp/vapp-${vappUuid(vappId)}/action/undeploy`,
-        data: payload,
+        method: 'POST', url: `/vApp/vapp-${uuid}/action/undeploy`,
+        data: makeUndeployPayload('powerOff'),
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' }
       }, zoneId);
       const task = response.data ? parseTaskResponse(response.data) : { _status: 'accepted' };
-      return this.formatMcpResponse(
-        { ...task, vappId, message: 'vApp undeploy task queued.' },
-        zoneId || this.zoneManager.getConfig().defaultZone
-      );
-    } catch (error) {
-      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
-        code: 'UNDEPLOY_VAPP_ERROR',
-        message: error instanceof Error ? error.message : 'Failed to undeploy vApp',
-        details: error
-      });
+      return this.formatMcpResponse({ ...task, vappId, message: 'vApp undeploy task queued.' }, zone);
+    } catch (e1: any) {
+      // Strategy 2: power off individual VMs then undeploy with default action
+      try {
+        // Get VM UUIDs from vApp XML
+        const vappResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vapp-${uuid}` }, zoneId);
+        const vmUuids = [...String(vappResp.data).matchAll(/\/vApp\/vm-([0-9a-f-]{36})/g)].map(m => m[1] as string);
+        const seen = new Set<string>();
+        for (const vmId of vmUuids) {
+          if (seen.has(vmId)) continue;
+          seen.add(vmId);
+          await this.makeRequest<string>({
+            method: 'POST', url: `/vApp/vm-${vmId}/power/action/powerOff`
+          }, zoneId).catch(() => {});
+        }
+        // Wait for individual power-offs to settle before retrying undeploy
+        await new Promise(r => setTimeout(r, 15000));
+        const response2 = await this.makeRequest<string>({
+          method: 'POST', url: `/vApp/vapp-${uuid}/action/undeploy`,
+          data: makeUndeployPayload('powerOff'),
+          headers: { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' }
+        }, zoneId);
+        const task2 = response2.data ? parseTaskResponse(response2.data) : { _status: 'accepted' };
+        return this.formatMcpResponse({ ...task2, vappId, message: 'vApp undeploy task queued (fallback).' }, zone);
+      } catch (e2: any) {
+        return this.formatMcpResponse({}, zone, {
+          code: 'UNDEPLOY_VAPP_ERROR',
+          message: e1 instanceof Error ? e1.message : 'Failed to undeploy vApp',
+          details: e1
+        });
+      }
     }
   }
 
@@ -1235,6 +1257,16 @@ export class ZettagridClient {
   async createVApp(vdcId: string, templateId: string, vappName: string, zoneId?: string, instantiationParams?: VAppInstantiationParams): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
+      // Resolve catalogItem href → vAppTemplate href (VCD instantiateVAppTemplate requires vAppTemplate URL)
+      if (templateId && templateId.includes('/api/catalogItem/')) {
+        try {
+          const uuid = templateId.split('/api/catalogItem/').pop()!.split('?')[0]!;
+          const itemResp = await this.makeRequest<string>({ method: 'GET', url: `/catalogItem/${uuid}` }, zoneId);
+          const entityMatch = String(itemResp.data).match(/<Entity\b[^>]*href="([^"]*vAppTemplate[^"]*)"[^>]*>/i);
+          if (entityMatch?.[1]) templateId = entityMatch[1];
+        } catch {}
+      }
+
       // Legacy: map old guestCustomization into vmConfigs[0]
       const effectiveVmConfigs: VAppVmConfig[] = instantiationParams?.vmConfigs?.length
         ? instantiationParams.vmConfigs
@@ -1497,6 +1529,16 @@ export class ZettagridClient {
   ): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
+      // Resolve catalogItem href → vAppTemplate href
+      if (templateId && templateId.includes('/api/catalogItem/')) {
+        try {
+          const uuid = templateId.split('/api/catalogItem/').pop()!.split('?')[0]!;
+          const itemResp = await this.makeRequest<string>({ method: 'GET', url: `/catalogItem/${uuid}` }, zoneId);
+          const entityMatch = String(itemResp.data).match(/<Entity\b[^>]*href="([^"]*vAppTemplate[^"]*)"[^>]*>/i);
+          if (entityMatch?.[1]) templateId = entityMatch[1];
+        } catch {}
+      }
+
       // Resolve the first VM href from the template
       const templateVms = await this.fetchTemplateVmHrefs(templateId, zoneId);
       if (!templateVms.length) {
@@ -2738,33 +2780,41 @@ export class ZettagridClient {
   async updateVMDisk(vmId: string, diskSizeMB: number, zoneId?: string): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
+      const uuid = vmUuid(vmId);
+
+      // Find primary disk item: InstanceID 2000 first, then largest capacity as fallback
+      const findDiskItem = (xmlStr: string): string | null => {
+        const pat = /<Item\b[\s\S]*?<\/Item>/g;
+        let m: RegExpExecArray | null;
+        while ((m = pat.exec(xmlStr)) !== null) {
+          if (m[0].includes('<rasd:InstanceID>2000</rasd:InstanceID>')) return m[0];
+        }
+        pat.lastIndex = 0;
+        let maxCap = 0; let found: string | null = null;
+        while ((m = pat.exec(xmlStr)) !== null) {
+          const capM = /\w+:capacity="(\d+)"/.exec(m[0]);
+          if (capM?.[1]) { const cap = parseInt(capM[1], 10); if (cap > maxCap) { maxCap = cap; found = m[0]; } }
+        }
+        return found;
+      };
+
+      // Build updated disk XML with new capacity (capacity in MB, VirtualQuantity in bytes)
+      const buildUpdatedXml = (xmlStr: string, item: string): string => {
+        const diskSizeBytes = diskSizeMB * 1024 * 1024;
+        const capacityPrefix = item.match(/(\w+):capacity="\d+"/)?.[1] ?? 'ns10';
+        const updatedItem = item
+          .replace(/\w+:capacity="\d+"/, `${capacityPrefix}:capacity="${diskSizeMB}"`)
+          .replace(/(<rasd:VirtualQuantity>)\d+(<\/rasd:VirtualQuantity>)/, `$1${diskSizeBytes}$2`);
+        return xmlStr.replace(item, updatedItem);
+      };
+
       const getResp = await this.makeRequest<string>({
         method: 'GET',
-        url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/disks`
+        url: `/vApp/vm-${uuid}/virtualHardwareSection/disks`
       }, zoneId);
       const xml = getResp.data as unknown as string;
-      // Scan individual <Item>...</Item> blocks to avoid cross-block regex spanning
-      const itemPattern = /<Item\b[\s\S]*?<\/Item>/g;
-      let diskItem: string | null = null;
-      let im: RegExpExecArray | null;
-      while ((im = itemPattern.exec(xml)) !== null) {
-        if (im[0].includes('<rasd:InstanceID>2000</rasd:InstanceID>')) {
-          diskItem = im[0];
-          break;
-        }
-      }
-      // Fallback: use disk with largest capacity (covers templates with non-standard InstanceIDs)
-      if (!diskItem) {
-        let maxCap = 0;
-        itemPattern.lastIndex = 0;
-        while ((im = itemPattern.exec(xml)) !== null) {
-          const capM = /\w+:capacity="(\d+)"/.exec(im[0]);
-          if (capM?.[1]) {
-            const cap = parseInt(capM[1], 10);
-            if (cap > maxCap) { maxCap = cap; diskItem = im[0]; }
-          }
-        }
-      }
+
+      const diskItem = findDiskItem(xml);
       if (!diskItem) {
         const ids = [...xml.matchAll(/<rasd:InstanceID>(\d+)<\/rasd:InstanceID>/g)].map(x => x[1]);
         throw new Error(`No disk item found in virtualHardwareSection/disks. Present IDs: [${ids.join(', ')}]`);
@@ -2783,38 +2833,55 @@ export class ZettagridClient {
         });
       }
 
-      // VirtualQuantity is in bytes; capacity attribute is in MB with a dynamic namespace prefix
-      const diskSizeBytes = diskSizeMB * 1024 * 1024;
-      const capacityPrefix = diskItem.match(/(\w+):capacity="\d+"/)?.[1] ?? 'ns10';
-      const updatedItem = diskItem
-        .replace(/\w+:capacity="\d+"/, `${capacityPrefix}:capacity="${diskSizeMB}"`)
-        .replace(/(<rasd:VirtualQuantity>)\d+(<\/rasd:VirtualQuantity>)/, `$1${diskSizeBytes}$2`);
-      const updated = xml.replace(diskItem, updatedItem);
-
+      // Strategy 1: Legacy PUT (works for powered-off VMs or VMs with hot-extend support)
       try {
         const putResp = await this.makeRequest<string>({
           method: 'PUT',
-          url: `/vApp/vm-${vmUuid(vmId)}/virtualHardwareSection/disks`,
-          data: updated,
+          url: `/vApp/vm-${uuid}/virtualHardwareSection/disks`,
+          data: buildUpdatedXml(xml, diskItem),
           headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
         }, zoneId);
-        return this.formatMcpResponse(
-          { ...parseTaskResponse(putResp.data), diskSizeMB },
-          zone
-        );
-      } catch (legacyErr) {
-        // Legacy PUT rejected (commonly: VM is powered on). Try CloudAPI hot-extend.
-        const vmUrn = vmId.startsWith('urn:') ? vmId : `urn:vcloud:vm:${vmUuid(vmId)}`;
-        const disksData = await this.makeCloudApiRequest<any>('GET', `/vms/${vmUrn}/disks`, zoneId);
-        const disks: any[] = disksData.values ?? [];
-        const primaryDisk = disks.find((d: any) => d.busNumber === 0 && d.unitNumber === 0)
-          ?? (disks.length > 0 ? disks.reduce((a: any, b: any) => ((b.sizeInMb ?? 0) > (a.sizeInMb ?? 0) ? b : a)) : null);
-        if (!primaryDisk) throw legacyErr;
-        const putResult = await this.makeCloudApiRequest<any>(
-          'PUT', `/vms/${vmUrn}/disks/${primaryDisk.id}`, zoneId,
-          { ...primaryDisk, sizeInMb: diskSizeMB }
-        );
-        return this.formatMcpResponse({ ...putResult, diskSizeMB }, zone);
+        return this.formatMcpResponse({ ...parseTaskResponse(putResp.data), diskSizeMB }, zone);
+      } catch {
+        // Strategy 2: CloudAPI hot-extend (VCD 10.3+, /cloudapi/1.0.0/vms/{id}/disks)
+        try {
+          const vmUrn = vmId.startsWith('urn:') ? vmId : `urn:vcloud:vm:${uuid}`;
+          const disksData = await this.makeCloudApiRequest<any>('GET', `/vms/${vmUrn}/disks`, zoneId);
+          const disks: any[] = disksData.values ?? [];
+          const primaryDisk = disks.find((d: any) => d.busNumber === 0 && d.unitNumber === 0)
+            ?? (disks.length > 0 ? disks.reduce((a: any, b: any) => ((b.sizeInMb ?? 0) > (a.sizeInMb ?? 0) ? b : a)) : null);
+          if (!primaryDisk) throw new Error('No primary disk found via CloudAPI');
+          const putResult = await this.makeCloudApiRequest<any>(
+            'PUT', `/vms/${vmUrn}/disks/${primaryDisk.id}`, zoneId,
+            { ...primaryDisk, sizeInMb: diskSizeMB }
+          );
+          return this.formatMcpResponse({ ...putResult, diskSizeMB }, zone);
+        } catch {
+          // Strategy 3: Power off → extend → power on (VMs without hot-extend on older VCD)
+          await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOff` }, zoneId)
+            .catch(() => {}); // no-op if already powered off
+          let poweredOff = false;
+          const offDeadline = Date.now() + 60_000;
+          while (Date.now() < offDeadline) {
+            await new Promise(r => setTimeout(r, 2000));
+            const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId);
+            if ((vmResp.data as unknown as string).includes('status="8"')) { poweredOff = true; break; }
+          }
+          if (!poweredOff) throw new Error('VM did not power off within 60s for disk extend');
+          const getResp2 = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}/virtualHardwareSection/disks` }, zoneId);
+          const xml2 = getResp2.data as unknown as string;
+          const diskItem2 = findDiskItem(xml2);
+          if (!diskItem2) throw new Error('No disk item found after power off');
+          const putResp2 = await this.makeRequest<string>({
+            method: 'PUT',
+            url: `/vApp/vm-${uuid}/virtualHardwareSection/disks`,
+            data: buildUpdatedXml(xml2, diskItem2),
+            headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
+          }, zoneId);
+          // Restore powered-on state (fire and forget — disk extend is already done)
+          await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOn` }, zoneId).catch(() => {});
+          return this.formatMcpResponse({ ...parseTaskResponse(putResp2.data), diskSizeMB }, zone);
+        }
       }
     } catch (error) {
       return this.formatMcpResponse({}, zone, {
@@ -3076,7 +3143,19 @@ export class ZettagridClient {
     try {
       // VCD CloudAPI DELETE expects full URN in the path (HTTP 400 if only UUID is supplied)
       const id = profileId.startsWith('urn:vcloud:') ? profileId : `urn:vcloud:applicationPortProfile:${profileId}`;
-      await this.makeCloudApiRequest<any>('DELETE', `/applicationPortProfiles/${id}`, zoneId);
+      // Retry on BUSY_ENTITY: VCD locks the entity while its create task is still running
+      for (let attempt = 0; attempt < 4; attempt++) {
+        try {
+          await this.makeCloudApiRequest<any>('DELETE', `/applicationPortProfiles/${id}`, zoneId);
+          return this.formatMcpResponse({ deleted: true, profileId }, zone);
+        } catch (e: any) {
+          if (attempt < 3 && String(e?.message || '').includes('BUSY_ENTITY')) {
+            await new Promise(r => setTimeout(r, 3000 * (attempt + 1)));
+            continue;
+          }
+          throw e;
+        }
+      }
       return this.formatMcpResponse({ deleted: true, profileId }, zone);
     } catch (error) {
       return this.formatMcpResponse({}, zone, {
