@@ -106,11 +106,11 @@ describe('UC-VA-001 — Deploy a vApp from Catalog Template', () => {
   test('create_vapp deploys a new vApp from template', async () => {
     log.separator(UC + ': create_vapp');
 
-    // Resolve vdcId from vdcName (create_vapp requires vdcId, not vdcName)
+    // Resolve vdcId from vdcName — must match DC_1138718 exactly; never fall back to another VDC
     const vdcs = toArray(await client.call('list_vdcs', {}));
-    const vdc  = vdcs.find(v => v.name === cfg.fixtures.vdcName) || vdcs[0];
+    const vdc  = vdcs.find(v => v.name === cfg.fixtures.vdcName);
     const vdcId = vdc?.id || vdc?.vdcId;
-    if (!vdcId) { log.warn('No VDC found — skipping create_vapp'); return; }
+    if (!vdcId) { log.warn(`VDC "${cfg.fixtures.vdcName}" not found — skipping create_vapp`); return; }
     log.info(`Using vdcId: ${vdcId}`);
 
     const vappName = `test-vapp-${Date.now()}`;

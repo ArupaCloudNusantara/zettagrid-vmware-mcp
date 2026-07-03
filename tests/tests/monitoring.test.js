@@ -157,7 +157,8 @@ describe('UC-MON-003 — View VDC Resource Allocation', () => {
   test('show_vdc_resources returns allocation for a specific VDC', async () => {
     log.separator(UC + ': show_vdc_resources');
     const vdcs  = toArray(await client.call('list_vdcs', {}));
-    const vdcId = get(vdcs[0], 'id') || get(vdcs[0], 'vdcId');
+    const vdc   = vdcs.find(v => v.name === cfg.fixtures.vdcName) || vdcs[0];
+    const vdcId = get(vdc, 'id') || get(vdc, 'vdcId');
     const result = await client.call('show_vdc_resources', { vdcId });
     log.debug(`show_vdc_resources: ${JSON.stringify(result).slice(0, 300)}`);
     log.result(UC, 'show_vdc_resources returns data', !!result, `vdcId=${vdcId}`);
@@ -167,7 +168,8 @@ describe('UC-MON-003 — View VDC Resource Allocation', () => {
   test('VDC resource report contains CPU, RAM and storage fields', async () => {
     log.separator(UC + ': verify resource fields');
     const vdcs   = toArray(await client.call('list_vdcs', {}));
-    const vdcId  = get(vdcs[0], 'id') || get(vdcs[0], 'vdcId');
+    const vdc    = vdcs.find(v => v.name === cfg.fixtures.vdcName) || vdcs[0];
+    const vdcId  = get(vdc, 'id') || get(vdc, 'vdcId');
     const result = await client.call('show_vdc_resources', { vdcId });
 
     const text = typeof result === 'string' ? result.toLowerCase() : JSON.stringify(result).toLowerCase();
@@ -304,7 +306,8 @@ describe('UC-MON-007 — Get VDC Detail', () => {
     log.separator(UC + ': list_vdcs');
     const vdcs = toArray(await client.call('list_vdcs', {}));
     expect(vdcs.length).toBeGreaterThan(0);
-    vdcId = get(vdcs[0], 'id') || get(vdcs[0], 'vdcId');
+    const vdc = vdcs.find(v => v.name === cfg.fixtures.vdcName) || vdcs[0];
+    vdcId = get(vdc, 'id') || get(vdc, 'vdcId');
     log.result(UC, 'VDC found', !!vdcId, `vdcId=${vdcId}`);
   });
 

@@ -57,7 +57,7 @@ beforeAll(async () => {
   // Discover VDC ID (needed for create_application_port_profile contextEntityId)
   try {
     const vdcs = toArray(await client.call('list_vdcs', {}));
-    const vdc  = vdcs.find(v => v.name === cfg.fixtures.vdcName) || vdcs[0];
+    const vdc  = vdcs.find(v => v.name === cfg.fixtures.vdcName);
     resolvedVdcId = get(vdc, 'id') || get(vdc, 'vdcId') || null;
     log.info(`Discovered vdcId: ${resolvedVdcId}`);
   } catch (e) {
