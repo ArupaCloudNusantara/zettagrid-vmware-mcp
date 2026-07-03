@@ -14,14 +14,22 @@ async function waitForTask(client, taskId, timeoutMs = cfg.timeouts.taskPoll) {
   const deadline = Date.now() + timeoutMs;
   let last;
   while (Date.now() < deadline) {
-    const raw = await client.call('get_task', { taskId });
-    if (Date.now() >= deadline) break;   // guard: don't log after deadline
-    last = raw?.data ?? raw;
-    // VCD task status field is 'taskStatus' in parseTaskResponse output
-    const status = (last?.taskStatus || last?.status || last?.operationKey || '').toLowerCase();
-    log.debug(`Task ${taskId} status: ${status}`);
-    if (status === 'success' || status === 'completed') return last;
-    if (status === 'error'   || status === 'aborted')   throw new Error(`Task ${taskId} failed: ${last?.message || last?.description || status}`);
+    // Cap each get_task call to 30s so a slow/stuck VCD doesn't block the entire deadline.
+    const callTimeout = Math.min(30_000, Math.max(1000, deadline - Date.now()));
+    try {
+      const raw = await client.call('get_task', { taskId }, callTimeout);
+      if (Date.now() >= deadline) break;   // guard: don't log after deadline
+      last = raw?.data ?? raw;
+      // VCD task status field is 'taskStatus' in parseTaskResponse output
+      const status = (last?.taskStatus || last?.status || last?.operationKey || '').toLowerCase();
+      log.debug(`Task ${taskId} status: ${status}`);
+      if (status === 'success' || status === 'completed') return last;
+      if (status === 'error'   || status === 'aborted')   throw new Error(`Task ${taskId} failed: ${last?.message || last?.description || status}`);
+    } catch (callErr) {
+      if (Date.now() >= deadline) break;  // deadline expired — exit loop and throw timeout
+      // Per-call timeout or network hiccup — retry
+      log.debug(`Task ${taskId} get_task call failed (will retry): ${callErr.message}`);
+    }
     await sleep(cfg.timeouts.taskInterval);
   }
   throw new Error(`Task ${taskId} timed out after ${timeoutMs}ms. Last: ${JSON.stringify(last)}`);

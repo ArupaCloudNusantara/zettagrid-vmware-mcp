@@ -11,7 +11,7 @@
 const McpClient = require('../McpClient');
 const cfg       = require('../config');
 const { makeLogger } = require('../logger');
-const { waitForTask, waitForVmPower, toArray, get } = require('../helpers');
+const { waitForTask, waitForVmPower, toArray, get, sleep } = require('../helpers');
 
 const log = makeLogger('vm-lifecycle');
 let client;
@@ -397,10 +397,15 @@ describe('UC-VM-011 — Memory Hot-Add: Enable and Use', () => {
     log.separator(UC + ': enable memoryHotAdd');
     await client.call('power_off_vm', { vmId }, cfg.timeouts.powerOp).catch(() => {});
     await waitForVmPower(client, vmId, 'poweredOff').catch(() => {});
+    // Allow VCD to fully release the entity lock after power-off before modifying VM config.
+    // Without this delay the memory PUT task intermittently fails: UC-VM-009 works because it
+    // has a get_vm call here as a natural buffer; UC-VM-011 does not.
+    await sleep(8_000);
 
     const result = await client.call('update_vm_memory', { vmId, memoryMB: BASE_MEMORY_MB, memoryHotAdd: true });
     const taskId = get(result, 'data', 'taskId') || get(result, 'taskId');
     if (taskId) await waitForTask(client, taskId);
+    if (get(result, 'success') === false) log.warn(`${UC}: update_vm_memory error: ${JSON.stringify(get(result, 'error'))}`);
     log.result(UC, 'memory hot-add enabled', get(result, 'success') !== false);
     expect(get(result, 'success')).not.toBe(false);
   });
