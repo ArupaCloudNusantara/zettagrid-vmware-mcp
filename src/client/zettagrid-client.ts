@@ -2873,7 +2873,13 @@ export class ZettagridClient {
             const vappM = /\/vApp\/vapp-([0-9a-f-]{36})/.exec(vmXml);
             if (!vappM) throw new Error(`VAPP_DEPLOY error on VM ${uuid} and could not locate parent vApp in VM XML`);
             parentVappUuid = vappM[1] ?? null;
-            await this.makeRequest<string>({ method: 'POST', url: `/vApp/vapp-${parentVappUuid}/power/action/powerOff` }, zoneId);
+            // Use undeploy (not powerOff) — deployed vApps reject /power/action/powerOff with VAPP_DEPLOY
+            await this.makeRequest<string>({
+              method: 'POST',
+              url: `/vApp/vapp-${parentVappUuid}/action/undeploy`,
+              data: '<?xml version="1.0" encoding="UTF-8"?>\n<UndeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">\n  <UndeployPowerAction>powerOff</UndeployPowerAction>\n</UndeployVAppParams>',
+              headers: { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' }
+            }, zoneId);
           }
           let poweredOff = false;
           const offDeadline = Date.now() + 120_000;

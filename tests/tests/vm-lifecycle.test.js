@@ -537,13 +537,14 @@ describe('UC-VM-014 — Disk Extend While VM is Powered On', () => {
     currentDiskMB = diskGb * 1024;
     const newDiskMB = currentDiskMB + 5120; // +5 GB
 
-    const result = await client.call('update_vm_disk', { vmId, diskSizeMB: newDiskMB });
+    // Strategy 3 (powerOff vApp + extend + powerOn) can take >2 min — use taskPoll timeout
+    const result = await client.call('update_vm_disk', { vmId, diskSizeMB: newDiskMB }, cfg.timeouts.taskPoll);
     const taskId = get(result, 'data', 'taskId') || get(result, 'taskId');
     if (taskId) await waitForTask(client, taskId);
     const extOk = get(result, 'success') !== false;
     log.result(UC, `disk extended to ${newDiskMB} MB while powered on`, extOk, extOk ? '' : `err=${JSON.stringify(result?.error || '').slice(0,300)}`);
     expect(extOk).toBe(true);
-  });
+  }, cfg.timeouts.taskPoll);
 
   test('get_vm reflects updated disk size', async () => {
     log.separator(UC + ': verify disk size');

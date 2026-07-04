@@ -135,15 +135,17 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
       portProfiles:  [resolvedAppPortProfileId],
       logging:       false,
     });
-    // CloudAPI returns 202 without ID — poll until the new rule appears (not in pre-create snapshot)
+    // CloudAPI returns 202 without ID — poll until the new rule appears (not in pre-create snapshot).
+    // NSX-T propagation can take >6s, so poll up to 30s and also match by unique name as fallback.
     let ruleId = get(result, 'data', 'id') || get(result, 'data', 'ruleId') || get(result, 'id') || get(result, 'ruleId');
     if (!ruleId) {
-      for (let i = 0; i < 6; i++) {
-        await new Promise(r => setTimeout(r, 1000));
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 3000));
         const rules = toArray(await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
         const newRule = rules.find(r => {
           const rid = get(r, 'id') || get(r, 'ruleId');
-          return rid && !existingIds.has(rid);
+          // Match by ID not in the pre-create snapshot, OR by unique display name
+          return (rid && !existingIds.has(rid)) || (get(r, 'displayName') || get(r, 'name')) === ruleName;
         });
         if (newRule) { ruleId = get(newRule, 'id') || get(newRule, 'ruleId'); break; }
       }
@@ -152,7 +154,7 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
     created.firewallRuleName = ruleName;
     log.result(UC, 'create_firewall_rule', !!result, `ruleId=${ruleId}`);
     expect(result).toBeTruthy();
-  }, 30_000);
+  }, 60_000);
 
   test('list_firewall_rules includes the newly created rule', async () => {
     log.separator(UC + ': verify rule exists');
@@ -160,6 +162,14 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
       edgeGatewayId: resolvedEdgeGatewayId,
     });
     const rules = toArray(result);
+    // If create-time polling didn't capture the ruleId (NSX-T async delay), find it now by name
+    if (!created.firewallRuleId && created.firewallRuleName) {
+      const byName = rules.find(r => (get(r, 'displayName') || get(r, 'name')) === created.firewallRuleName);
+      if (byName) {
+        created.firewallRuleId = get(byName, 'id') || get(byName, 'ruleId');
+        log.info(`UC-NET-001: captured ruleId=${created.firewallRuleId} by name match`);
+      }
+    }
     const found = created.firewallRuleId
       ? rules.some(r => (r.id || r.ruleId) === created.firewallRuleId)
       : rules.length > 0;
@@ -175,12 +185,14 @@ describe('UC-NET-002 — Update an Existing Firewall Rule', () => {
   test('update_firewall_rule changes action from ALLOW to DROP', async () => {
     log.separator(UC + ': update_firewall_rule');
     if (!created.firewallRuleId) {
-      log.warn('No created ruleId — fetching first available rule');
+      log.warn('No created ruleId — fetching first user-defined rule');
       const rules = toArray(await client.call('list_firewall_rules', {
         edgeGatewayId: resolvedEdgeGatewayId,
       }));
-      expect(rules.length).toBeGreaterThan(0);
-      created.firewallRuleId = get(rules[0], 'id') || get(rules[0], 'ruleId');
+      // Only use user-defined rules (not default/system rules) — default rules are read-only
+      const userRule = rules.find(r => !r._isDefault && (get(r, 'id') || get(r, 'ruleId')));
+      expect(userRule).toBeTruthy();
+      created.firewallRuleId = get(userRule, 'id') || get(userRule, 'ruleId');
     }
 
     const result = await client.call('update_firewall_rule', {
@@ -189,8 +201,10 @@ describe('UC-NET-002 — Update an Existing Firewall Rule', () => {
       name:          created.firewallRuleName || 'qa-fw-rule-updated',
       policy:        'drop',
     });
-    log.result(UC, 'update_firewall_rule to drop', !!result);
-    expect(result).toBeTruthy();
+    const updateOk = get(result, 'success') !== false;
+    log.result(UC, 'update_firewall_rule to drop', updateOk,
+      updateOk ? '' : `err=${JSON.stringify(get(result, 'error')).slice(0, 200)}`);
+    expect(updateOk).toBe(true);
   });
 
   test('list_firewall_rules reflects updated action', async () => {
