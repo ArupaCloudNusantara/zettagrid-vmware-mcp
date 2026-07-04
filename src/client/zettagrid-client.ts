@@ -2857,8 +2857,24 @@ export class ZettagridClient {
           );
           return this.formatMcpResponse({ ...putResult, diskSizeMB }, zone);
         } catch {
-          // Strategy 3: Power off → extend → power on (VMs without hot-extend on older VCD)
-          await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOff` }, zoneId);
+          // Strategy 3: Power off → extend → power on (VMs without hot-extend on older VCD).
+          // VMs inside a "deployed" vApp (created via power_on_vapp) cannot be individually
+          // powered off via /vApp/vm-UUID/power/action/powerOff — VCD returns HTTP 400 VAPP_DEPLOY.
+          // In that case, fall back to powering off the parent vApp instead.
+          let parentVappUuid: string | null = null;
+          try {
+            await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOff` }, zoneId);
+          } catch (vmPowerOffErr) {
+            const errMsg = vmPowerOffErr instanceof Error ? vmPowerOffErr.message : String(vmPowerOffErr);
+            if (!errMsg.includes('VAPP_DEPLOY') && !errMsg.includes('400')) throw vmPowerOffErr;
+            // VM is in a deployed vApp — find parent vApp UUID from the VM entity XML and power off vApp
+            const vmXmlResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId);
+            const vmXml = vmXmlResp.data as unknown as string;
+            const vappM = /\/vApp\/vapp-([0-9a-f-]{36})/.exec(vmXml);
+            if (!vappM) throw new Error(`VAPP_DEPLOY error on VM ${uuid} and could not locate parent vApp in VM XML`);
+            parentVappUuid = vappM[1] ?? null;
+            await this.makeRequest<string>({ method: 'POST', url: `/vApp/vapp-${parentVappUuid}/power/action/powerOff` }, zoneId);
+          }
           let poweredOff = false;
           const offDeadline = Date.now() + 120_000;
           while (Date.now() < offDeadline) {
@@ -2879,7 +2895,11 @@ export class ZettagridClient {
             headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
           }, zoneId);
           // Restore powered-on state (fire and forget — disk extend is already done)
-          await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOn` }, zoneId).catch(() => {});
+          if (parentVappUuid) {
+            await this.makeRequest<string>({ method: 'POST', url: `/vApp/vapp-${parentVappUuid}/power/action/powerOn` }, zoneId).catch(() => {});
+          } else {
+            await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOn` }, zoneId).catch(() => {});
+          }
           return this.formatMcpResponse({ ...parseTaskResponse(putResp2.data), diskSizeMB }, zone);
         }
       }

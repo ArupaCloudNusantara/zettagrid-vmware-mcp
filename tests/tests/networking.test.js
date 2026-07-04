@@ -28,13 +28,17 @@ beforeAll(async () => {
   client = new McpClient();
   await client.connect();
 
-  // Dynamically discover edge gateway if fixture is a placeholder
+  // Dynamically discover edge gateway — must belong to DC_1138718 only
   if (!resolvedEdgeGatewayId || resolvedEdgeGatewayId.includes('xxxxxxxx')) {
     try {
       const gws = toArray(await client.call('list_edge_gateways', {}));
-      if (gws.length > 0) {
-        resolvedEdgeGatewayId = get(gws[0], 'id') || get(gws[0], 'gatewayId') || resolvedEdgeGatewayId;
-        log.info(`Discovered edgeGatewayId: ${resolvedEdgeGatewayId}`);
+      // Prefer gateway owned by cfg.fixtures.vdcName (DC_1138718); never touch other VDCs
+      const targetGw = gws.find(gw => gw.ownerVdc === cfg.fixtures.vdcName) || null;
+      if (targetGw) {
+        resolvedEdgeGatewayId = get(targetGw, 'id') || get(targetGw, 'urn') || resolvedEdgeGatewayId;
+        log.info(`Discovered edgeGatewayId (ownerVdc=${targetGw.ownerVdc}): ${resolvedEdgeGatewayId}`);
+      } else if (gws.length > 0) {
+        log.warn(`No edge gateway found for VDC "${cfg.fixtures.vdcName}" — ${gws.map(g => g.ownerVdc).join(', ')}`);
       }
     } catch (e) {
       log.warn(`Could not discover edge gateway: ${e.message}`);
@@ -191,16 +195,23 @@ describe('UC-NET-002 — Update an Existing Firewall Rule', () => {
 
   test('list_firewall_rules reflects updated action', async () => {
     log.separator(UC + ': verify updated action');
-    await new Promise(r => setTimeout(r, 3000));  // allow NSX-T to propagate PUT
-    const rules = toArray(await client.call('list_firewall_rules', {
-      edgeGatewayId: resolvedEdgeGatewayId,
-    }));
-    const rule = rules.find(r => (r.id || r.ruleId) === created.firewallRuleId);
-    const action = (rule?.action || rule?.policy || '').toUpperCase().replace('ALLOW', 'ALLOW').replace('DROP', 'DROP');
-    const isDrop = action === 'DROP';
+    // NSX-T async propagation — poll until DROP is reflected (up to 15s)
+    let isDrop = false;
+    let action = '';
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await new Promise(r => setTimeout(r, 3000));
+      const rules = toArray(await client.call('list_firewall_rules', {
+        edgeGatewayId: resolvedEdgeGatewayId,
+      }));
+      const rule = rules.find(r => (r.id || r.ruleId) === created.firewallRuleId);
+      action = (rule?.action || rule?.policy || '').toUpperCase();
+      isDrop = action === 'DROP';
+      if (isDrop) break;
+      log.info(`${UC}: attempt ${attempt + 1}/5 — action="${action}" (not yet DROP, retrying)`);
+    }
     log.result(UC, 'action updated to DROP', isDrop, `action="${action}"`);
     expect(isDrop).toBe(true);
-  });
+  }, 30_000);
 });
 
 // ─── UC-NET-003: Delete Firewall Rule ─────────────────────────────────────
