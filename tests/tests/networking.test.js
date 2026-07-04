@@ -160,33 +160,41 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
 
   test('list_firewall_rules includes the newly created rule', async () => {
     log.separator(UC + ': verify rule exists');
-    const result = await client.call('list_firewall_rules', {
-      edgeGatewayId: resolvedEdgeGatewayId,
-    });
-    const rules = toArray(result);
-    // If create-time polling didn't capture the ruleId (NSX-T async delay >30s),
-    // find it now by ID-exclusion against the pre-create snapshot saved in `created`.
-    if (!created.firewallRuleId && created.firewallRulesBefore) {
-      const beforeSet = new Set(created.firewallRulesBefore);
-      const newRule = rules.find(r => {
-        const rid = get(r, 'id') || get(r, 'ruleId');
-        return rid && !beforeSet.has(rid);
-      });
-      if (newRule) {
-        created.firewallRuleId = get(newRule, 'id') || get(newRule, 'ruleId');
-        log.info(`UC-NET-001: captured ruleId=${created.firewallRuleId} by ID-exclusion`);
+    // NSX-T propagation can take >60s after create — poll up to 120s to find the new rule.
+    const beforeSet = created.firewallRulesBefore ? new Set(created.firewallRulesBefore) : null;
+    let rules = [];
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const result = await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId });
+      rules = toArray(result);
+      // If ruleId already captured during create-test polling, just verify it's present
+      if (created.firewallRuleId) {
+        if (rules.some(r => (r.id || r.ruleId) === created.firewallRuleId)) break;
+      } else if (beforeSet) {
+        // ID-exclusion: find a rule that wasn't in the pre-create snapshot
+        const newRule = rules.find(r => {
+          const rid = get(r, 'id') || get(r, 'ruleId');
+          return rid && !beforeSet.has(rid);
+        });
+        if (newRule) {
+          created.firewallRuleId = get(newRule, 'id') || get(newRule, 'ruleId');
+          log.info(`UC-NET-001: captured ruleId=${created.firewallRuleId} by ID-exclusion (attempt ${attempt + 1})`);
+          break;
+        }
       } else {
-        // Debug: log what names exist so we can diagnose future mismatches
-        const names = rules.map(r => `${get(r,'displayName')||get(r,'name')||'?'}=${get(r,'id')||get(r,'ruleId')||'?'}`).join(', ');
-        log.warn(`UC-NET-001: ID-exclusion fallback also failed. Rules: ${names}`);
+        break; // no snapshot to compare against — accept current list
       }
+      if (attempt < 23) await new Promise(r => setTimeout(r, 5000));
+    }
+    if (!created.firewallRuleId && beforeSet) {
+      const names = rules.map(r => `${get(r,'displayName')||get(r,'name')||'?'}=${get(r,'id')||get(r,'ruleId')||'?'}`).join(', ');
+      log.warn(`UC-NET-001: new rule still not visible after 120s. Rules: ${names}`);
     }
     const found = created.firewallRuleId
       ? rules.some(r => (r.id || r.ruleId) === created.firewallRuleId)
       : rules.length > 0;
     log.result(UC, 'new rule in list_firewall_rules', found, `totalRules=${rules.length}`);
     expect(found).toBe(true);
-  });
+  }, 150_000);
 });
 
 // ─── UC-NET-002: Update Firewall Rule ─────────────────────────────────────

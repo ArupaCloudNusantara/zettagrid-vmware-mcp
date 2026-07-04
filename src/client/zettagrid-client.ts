@@ -1816,7 +1816,7 @@ export class ZettagridClient {
       const portProfileId = (firewallRule as any).portProfileId as string | undefined;
       const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId ? [portProfileId] : [])];
       const payload: Record<string, any> = {
-        displayName: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
+        name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
         enabled: firewallRule.isEnabled !== false,
         action: firewallRule.policy === 'allow' ? 'ALLOW' : 'DROP',
         ipProtocol: 'IPV4_IPV6',
@@ -2370,9 +2370,10 @@ export class ZettagridClient {
       const portProfiles = firewallRule.portProfiles ?? (firewallRule as any).portProfiles as string[] | undefined;
       const portProfileId = (firewallRule as any).portProfileId as string | undefined;
       const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId ? [portProfileId] : [])];
+      // VCD CloudAPI PUT uses "name" (not "displayName") for the EdgeFirewallRule model
       const payload: Record<string, any> = {
         id: ruleId,
-        displayName: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
+        name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
         enabled: firewallRule.isEnabled !== false,
         action: firewallRule.policy === 'allow' ? 'ALLOW' : ((firewallRule.policy as string) === 'reject' ? 'REJECT' : 'DROP'),
         ipProtocol: 'IPV4_IPV6',
