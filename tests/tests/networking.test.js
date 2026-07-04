@@ -121,9 +121,11 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
 
   test('create_firewall_rule creates a new ALLOW rule', async () => {
     log.separator(UC + ': create_firewall_rule');
-    // Snapshot existing rule IDs before create — used to identify the new rule below
+    // Snapshot existing rule IDs before create — used to identify the new rule in verify step
     const rulesBefore = toArray(await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
     const existingIds = new Set(rulesBefore.map(r => get(r, 'id') || get(r, 'ruleId')).filter(Boolean));
+    // Save snapshot so the verify test can find the new rule by ID exclusion
+    created.firewallRulesBefore = [...existingIds];
 
     const ruleName = `qa-test-allow-https-${Date.now()}`;
     const result = await client.call('create_firewall_rule', {
@@ -136,10 +138,10 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
       logging:       false,
     });
     // CloudAPI returns 202 without ID — poll until the new rule appears (not in pre-create snapshot).
-    // NSX-T propagation can take >6s, so poll up to 30s and also match by unique name as fallback.
+    // NSX-T propagation can take >30s; poll up to 45s.
     let ruleId = get(result, 'data', 'id') || get(result, 'data', 'ruleId') || get(result, 'id') || get(result, 'ruleId');
     if (!ruleId) {
-      for (let i = 0; i < 10; i++) {
+      for (let i = 0; i < 15; i++) {
         await new Promise(r => setTimeout(r, 3000));
         const rules = toArray(await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
         const newRule = rules.find(r => {
@@ -154,7 +156,7 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
     created.firewallRuleName = ruleName;
     log.result(UC, 'create_firewall_rule', !!result, `ruleId=${ruleId}`);
     expect(result).toBeTruthy();
-  }, 60_000);
+  }, 90_000);
 
   test('list_firewall_rules includes the newly created rule', async () => {
     log.separator(UC + ': verify rule exists');
@@ -162,12 +164,21 @@ describe('UC-NET-001 — Create an Inbound Firewall Rule', () => {
       edgeGatewayId: resolvedEdgeGatewayId,
     });
     const rules = toArray(result);
-    // If create-time polling didn't capture the ruleId (NSX-T async delay), find it now by name
-    if (!created.firewallRuleId && created.firewallRuleName) {
-      const byName = rules.find(r => (get(r, 'displayName') || get(r, 'name')) === created.firewallRuleName);
-      if (byName) {
-        created.firewallRuleId = get(byName, 'id') || get(byName, 'ruleId');
-        log.info(`UC-NET-001: captured ruleId=${created.firewallRuleId} by name match`);
+    // If create-time polling didn't capture the ruleId (NSX-T async delay >30s),
+    // find it now by ID-exclusion against the pre-create snapshot saved in `created`.
+    if (!created.firewallRuleId && created.firewallRulesBefore) {
+      const beforeSet = new Set(created.firewallRulesBefore);
+      const newRule = rules.find(r => {
+        const rid = get(r, 'id') || get(r, 'ruleId');
+        return rid && !beforeSet.has(rid);
+      });
+      if (newRule) {
+        created.firewallRuleId = get(newRule, 'id') || get(newRule, 'ruleId');
+        log.info(`UC-NET-001: captured ruleId=${created.firewallRuleId} by ID-exclusion`);
+      } else {
+        // Debug: log what names exist so we can diagnose future mismatches
+        const names = rules.map(r => `${get(r,'displayName')||get(r,'name')||'?'}=${get(r,'id')||get(r,'ruleId')||'?'}`).join(', ');
+        log.warn(`UC-NET-001: ID-exclusion fallback also failed. Rules: ${names}`);
       }
     }
     const found = created.firewallRuleId
@@ -200,10 +211,11 @@ describe('UC-NET-002 — Update an Existing Firewall Rule', () => {
       ruleId:        created.firewallRuleId,
       name:          created.firewallRuleName || 'qa-fw-rule-updated',
       policy:        'drop',
+      portProfiles:  [resolvedAppPortProfileId],
     });
     const updateOk = get(result, 'success') !== false;
     log.result(UC, 'update_firewall_rule to drop', updateOk,
-      updateOk ? '' : `err=${JSON.stringify(get(result, 'error')).slice(0, 200)}`);
+      updateOk ? '' : `err=${JSON.stringify(get(result, 'error')).slice(0, 500)}`);
     expect(updateOk).toBe(true);
   });
 

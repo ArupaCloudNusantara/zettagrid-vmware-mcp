@@ -2858,28 +2858,48 @@ export class ZettagridClient {
           return this.formatMcpResponse({ ...putResult, diskSizeMB }, zone);
         } catch {
           // Strategy 3: Power off → extend → power on (VMs without hot-extend on older VCD).
-          // VMs inside a "deployed" vApp (created via power_on_vapp) cannot be individually
-          // powered off via /vApp/vm-UUID/power/action/powerOff — VCD returns HTTP 400 VAPP_DEPLOY.
-          // In that case, fall back to powering off the parent vApp instead.
+          // VMs inside a "deployed" vApp cannot be individually powered off (VAPP_DEPLOY 400).
+          // Fall back: try VM-level undeploy, then vApp-level undeploy with individual-VM pre-poweroff.
           let parentVappUuid: string | null = null;
+          const undeployXml = '<?xml version="1.0" encoding="UTF-8"?>\n<UndeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">\n  <UndeployPowerAction>powerOff</UndeployPowerAction>\n</UndeployVAppParams>';
+          const undeployHdrs = { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' };
           try {
             await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOff` }, zoneId);
           } catch (vmPowerOffErr) {
             const errMsg = vmPowerOffErr instanceof Error ? vmPowerOffErr.message : String(vmPowerOffErr);
             if (!errMsg.includes('VAPP_DEPLOY') && !errMsg.includes('400')) throw vmPowerOffErr;
-            // VM is in a deployed vApp — find parent vApp UUID from the VM entity XML and power off vApp
-            const vmXmlResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId);
-            const vmXml = vmXmlResp.data as unknown as string;
-            const vappM = /\/vApp\/vapp-([0-9a-f-]{36})/.exec(vmXml);
-            if (!vappM) throw new Error(`VAPP_DEPLOY error on VM ${uuid} and could not locate parent vApp in VM XML`);
-            parentVappUuid = vappM[1] ?? null;
-            // Use undeploy (not powerOff) — deployed vApps reject /power/action/powerOff with VAPP_DEPLOY
-            await this.makeRequest<string>({
-              method: 'POST',
-              url: `/vApp/vapp-${parentVappUuid}/action/undeploy`,
-              data: '<?xml version="1.0" encoding="UTF-8"?>\n<UndeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">\n  <UndeployPowerAction>powerOff</UndeployPowerAction>\n</UndeployVAppParams>',
-              headers: { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' }
-            }, zoneId);
+            // Brief pause so VCD processes the rejected request before next call
+            await new Promise(r => setTimeout(r, 2000));
+            // Attempt A: VM-level undeploy (less disruptive than whole-vApp undeploy)
+            let vmUndeployOk = false;
+            try {
+              await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/action/undeploy`, data: undeployXml, headers: undeployHdrs }, zoneId);
+              vmUndeployOk = true;
+            } catch { /* fall through to vApp undeploy */ }
+            if (!vmUndeployOk) {
+              // Find parent vApp UUID from the VM entity XML
+              const vmXmlResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId);
+              const vmXml = vmXmlResp.data as unknown as string;
+              const vappM = /Link[^>]+rel="up"[^>]+href="[^"]*\/vApp\/vapp-([0-9a-f-]{36})/.exec(vmXml)
+                         || /\/vApp\/vapp-([0-9a-f-]{36})/.exec(vmXml);
+              if (!vappM) throw new Error(`VAPP_DEPLOY on VM ${uuid}: cannot locate parent vApp in VM XML`);
+              parentVappUuid = vappM[1] ?? null;
+              // Attempt B: direct vApp undeploy
+              try {
+                await this.makeRequest<string>({ method: 'POST', url: `/vApp/vapp-${parentVappUuid}/action/undeploy`, data: undeployXml, headers: undeployHdrs }, zoneId);
+              } catch {
+                // Attempt C: power off each VM individually first (mirrors undeployVApp strategy 2)
+                const vappXmlResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vapp-${parentVappUuid}` }, zoneId);
+                const vmUuids = [...String(vappXmlResp.data).matchAll(/\/vApp\/vm-([0-9a-f-]{36})/g)].map(m => m[1] as string);
+                const seenVms = new Set<string>();
+                for (const vid of vmUuids) {
+                  if (seenVms.has(vid)) continue; seenVms.add(vid);
+                  await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${vid}/power/action/powerOff` }, zoneId).catch(() => {});
+                }
+                await new Promise(r => setTimeout(r, 15000));
+                await this.makeRequest<string>({ method: 'POST', url: `/vApp/vapp-${parentVappUuid}/action/undeploy`, data: undeployXml, headers: undeployHdrs }, zoneId);
+              }
+            }
           }
           let poweredOff = false;
           const offDeadline = Date.now() + 120_000;
