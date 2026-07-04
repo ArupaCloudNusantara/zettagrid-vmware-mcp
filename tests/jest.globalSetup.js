@@ -53,7 +53,24 @@ function toVappUrn(raw) {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+async function deleteStaleVapp(client, vappName) {
+  const vapps = toArray(await client.call('list_vapps', {}));
+  const stale = vapps.find(v => v.name === vappName);
+  if (!stale) return;
+  const staleId = toVappUrn(stale.id || stale.vappId || stale.href);
+  if (!staleId) return;
+  console.log(`  ⚠️  Stale vApp "${vappName}" found (${staleId}) — deleting before recreating…`);
+  const del = await client.call('delete_vapp', { vappId: staleId }, TASK_TIMEOUT);
+  const delTask = get(del, 'data', 'taskId') || get(del, 'taskId');
+  if (delTask) await waitForTask(client, delTask, TASK_TIMEOUT);
+  await sleep(3_000);
+  console.log(`  ✓ Stale "${vappName}" deleted`);
+}
+
 async function createVapp(client, vappName) {
+  // Delete any stale vApp with the same name (leftover from a crashed/interrupted run)
+  await deleteStaleVapp(client, vappName);
+
   console.log(`  → Creating vApp "${vappName}"…`);
   const result = await client.call('create_vapp', {
     vappName,
