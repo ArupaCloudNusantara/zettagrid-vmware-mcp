@@ -140,7 +140,7 @@ describe('UC-VM-004 — Reboot a Virtual Machine', () => {
         // VCD may return HTTP 500 internally but still complete the reboot.
         // Only fail if the VM didn't end up powered on.
         const vm = await client.call('get_vm', { vmId: cfg.fixtures.vmIdTools }).catch(() => null);
-        const state = (vm?.data?.status || vm?.status || '').toLowerCase();
+        const state = String(vm?.data?.statusDescription || vm?.data?.status || vm?.status || '').toLowerCase();
         if (!/poweredon|powered_on/.test(state)) throw e;
         log.warn(`${UC}: reboot task failed but VM is powered on — VCD internal error: ${e.message.slice(0, 120)}`);
       });

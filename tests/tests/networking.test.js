@@ -45,12 +45,17 @@ beforeAll(async () => {
     }
   }
 
-  // Dynamically discover app port profile if fixture is a placeholder
-  if (!resolvedAppPortProfileId || resolvedAppPortProfileId.includes('xxxxxxxx')) {
+  // Dynamically discover app port profile — trigger if missing, placeholder, or non-UUID (symbolic URNs
+  // like 'urn:vcloud:applicationPortProfile:HTTPS' are rejected by VCD CloudAPI PUT with HTTP 400).
+  const hasUuidId = (id) => id && /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/.test(id);
+  if (!resolvedAppPortProfileId || resolvedAppPortProfileId.includes('xxxxxxxx') || !hasUuidId(resolvedAppPortProfileId)) {
     try {
       const profiles = toArray(await client.call('list_application_port_profiles', {}));
-      if (profiles.length > 0) {
-        resolvedAppPortProfileId = get(profiles[0], 'id') || get(profiles[0], 'profileId') || resolvedAppPortProfileId;
+      // Prefer UUID-based profiles (tenant-defined); system profiles use symbolic URNs that VCD rejects.
+      const uuidProfile = profiles.find(p => hasUuidId(get(p, 'id') || get(p, 'profileId')));
+      const profile = uuidProfile || profiles[0];
+      if (profile) {
+        resolvedAppPortProfileId = get(profile, 'id') || get(profile, 'profileId') || resolvedAppPortProfileId;
         log.info(`Discovered appPortProfileId: ${resolvedAppPortProfileId}`);
       }
     } catch (e) {
