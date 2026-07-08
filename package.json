@@ -1,6 +1,6 @@
 {
   "name": "@zettagrid/vmware-mcp",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Zettagrid VMware MCP Server - Comprehensive tenant organization management across Australian and Indonesian zones",
   "type": "module",
   "main": "build/index.js",
@@ -11,7 +11,7 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "start": "node build/index.js",
-    "test": "jest",
+    "test": "jest --runInBand",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
     "lint": "eslint src --ext .ts",

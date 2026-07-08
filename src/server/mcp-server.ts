@@ -629,14 +629,14 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_cpu',
-          description: 'Update the vCPU count of a VM. VM must be powered off. SEQUENTIAL ONLY: vCD rejects concurrent updates to the same VM — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk. Optionally enable CPU hot-add (allows adding vCPUs while VM is running in future).',
+          description: 'Update the vCPU count of a VM and/or manage CPU hot-add. Two modes: (1) Powered-off VM — change cpuCount freely (increase or decrease) and optionally set cpuHotAdd to enable/disable hot-add. (2) Powered-on VM with hot-add enabled — increase cpuCount only (hot-remove is not supported; reducing vCPUs on a running VM is blocked). Do NOT provide coresPerSocket when hot-adding — the tool preserves the existing socket topology automatically to avoid vCD rejecting the change. SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for the returned task to succeed (get_task) before calling update_vm_memory or update_vm_disk.',
           inputSchema: {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
               cpuCount: { type: 'number', description: 'Number of vCPUs (e.g. 2, 4, 8)' },
-              coresPerSocket: { type: 'number', description: 'Cores per socket. Default: min(cpuCount, 16) — minimises socket count while capping at 16 cores/socket (e.g. 32 vCPU → 2 sockets × 16 cores). Only override for specific NUMA or licensing requirements.' },
-              cpuHotAdd: { type: 'boolean', description: 'Enable CPU hot-add (true) or disable it (false). When enabled, vCPUs can be added while the VM is powered on. Must be set while VM is powered off.' },
+              coresPerSocket: { type: 'number', description: 'Cores per socket. If omitted, the current value is read from the VM and preserved (important for hot-add on powered-on VMs). For new/powered-off VMs with no prior value, defaults to min(cpuCount, 16) to minimise socket count. Only set explicitly for specific NUMA or licensing requirements.' },
+              cpuHotAdd: { type: 'boolean', description: 'Enable CPU hot-add (true) or disable it (false). Allows adding vCPUs to a running VM in future. Must be set while VM is powered off; do not pass this when hot-adding vCPUs to a running VM.' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'cpuCount']
@@ -644,12 +644,13 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_memory',
-          description: 'Update the RAM of a VM. VM must be powered off. Parameter is "memoryMB" (NOT memorySizeMB). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_disk task to complete first.',
+          description: 'Update the RAM of a VM and/or manage memory hot-add. Two modes: (1) Powered-off VM — change memoryMB freely (increase or decrease) and optionally set memoryHotAdd to enable/disable hot-add. (2) Powered-on VM with hot-add enabled — increase memoryMB only; reducing memory on a running VM is blocked. Parameter is "memoryMB" (NOT memorySizeMB). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_disk task to complete first. ENFORCED SAFETY: (a) reducing memory on a powered-on VM is blocked — power off first; (b) hot-adding past the 3GB boundary (≤3072 MB → >3072 MB) is blocked — Linux guests freeze when this boundary is crossed (VMware KB 343190). Safe path to reach >3GB: (1) power off the VM, (2) call this tool with the target memoryMB and memoryHotAdd=true, (3) power on. Once the VM starts above 3GB, hot-add can expand up to 16× the initial powered-on size.',
           inputSchema: {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
               memoryMB: { type: 'number', description: 'Memory in MB (e.g. 1024=1GB, 2048=2GB, 4096=4GB, 8192=8GB)' },
+              memoryHotAdd: { type: 'boolean', description: 'Enable memory hot-add (true) or disable it (false). Allows increasing RAM on a running VM in future. Must be set while VM is powered off; do not pass this when hot-adding memory to a running VM.' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'memoryMB']
@@ -657,7 +658,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_disk',
-          description: 'Resize the boot disk of a VM. VM must be powered off. Size can only be increased, not decreased. Parameter is "diskSizeMB" (NOT diskSizeGB — multiply GB × 1024, e.g. 20 GB = 20480). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_memory task to complete first.',
+          description: 'Extend the boot disk of a VM. Can be done while the VM is powered on (vCD supports online disk extend). Size can only be increased, never decreased — shrink attempts are blocked. Parameter is "diskSizeMB" (NOT diskSizeGB — multiply GB × 1024, e.g. 20 GB = 20480). SEQUENTIAL ONLY: vCD rejects concurrent updates — wait for any in-flight update_vm_cpu or update_vm_memory task to complete first.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -1401,7 +1402,8 @@ export class ZettagridMcpServer {
             result = await this.client.updateVMMemory(
               req('vmId'),
               reqNum('memoryMB'),
-              args?.zoneId as string | undefined
+              args?.zoneId as string | undefined,
+              args?.memoryHotAdd as boolean | undefined
             );
             break;
 
