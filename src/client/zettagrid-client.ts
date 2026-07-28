@@ -26,7 +26,8 @@ import {
   PaginationParams,
   ListResponse,
   VAppInstantiationParams,
-  VAppVmConfig
+  VAppVmConfig,
+  VAppNetworkConnection
 } from '../types.js';
 import {
   parseVdcRecords,
@@ -1136,11 +1137,59 @@ export class ZettagridClient {
     }
   }
 
+  /** Fetch the set of network names already configured on an existing vApp's NetworkConfigSection
+   *  (excluding the special "none" entry). Used by addVMToVApp to decide whether a requested
+   *  network needs to be newly bridged in via InstantiationParams, or already exists on the vApp
+   *  and can be referenced directly as a NetworkAssignment containerNetwork. */
+  private async fetchVAppNetworkNames(vappId: string, zoneId?: string): Promise<Set<string>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vApp/vapp-${vappUuid(vappId)}`
+      }, zoneId);
+      const xml = response.data as unknown as string;
+      const names = new Set<string>();
+      const re = /<NetworkConfig\b[^>]*\bnetworkName="([^"]+)"/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(xml)) !== null) {
+        const name = m[1];
+        if (name && name.toLowerCase() !== 'none') names.add(name);
+      }
+      return names;
+    } catch {
+      return new Set<string>();
+    }
+  }
+
+  /** Compute {innerNetwork, containerNetwork} NetworkAssignment pairs for a VM whose template
+   *  NIC network name doesn't match the vApp network name it should attach to. Callers that pre-
+   *  rename networkConnections to already match the template name (see createVApp) naturally get
+   *  an empty result here, since innerNetwork === containerNetwork for every pair.
+   *  "none" (the template NIC was never connected to anything at capture time) is excluded too —
+   *  it's not a real OVF-declared network name, so vCD rejects a NetworkAssignment referencing it
+   *  as innerNetwork. A disconnected NIC is attached directly via the NetworkConnectionSection
+   *  override alone; there's nothing to remap away from. */
+  private computeNetworkAssignments(
+    templateNetworks: string[],
+    networkConnections?: VAppNetworkConnection[]
+  ): Array<{ innerNetwork: string; containerNetwork: string }> {
+    if (!templateNetworks.length || !networkConnections?.length) return [];
+    const targetNames = networkConnections.map(nc => nc.networkName);
+    return templateNetworks
+      .map((innerNetwork, i) => ({
+        innerNetwork,
+        containerNetwork: targetNames[i] ?? targetNames[0] ?? innerNetwork,
+      }))
+      .filter(a => a.innerNetwork !== a.containerNetwork && a.innerNetwork.toLowerCase() !== 'none');
+  }
+
   /** Build a complete SourcedItem XML block for one VM.
-   *  templateNetworks: NIC network names the template VM already has (e.g. ["VM Network"]).
-   *  When provided, NetworkAssignment elements are added to remap template NICs to the
-   *  user-specified vApp networks — without these vCD silently ignores the NIC override. */
-  private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string, templateNetworks?: string[], networkNameMap?: Map<string, string>): string {
+   *  networkAssignments: precomputed {innerNetwork, containerNetwork} pairs — innerNetwork is the
+   *  template VM's existing NIC network name (e.g. "VM Network"), containerNetwork is the vApp
+   *  network it should be remapped to. Only needed when the two names differ; without a
+   *  NetworkAssignment for a differing pair, vCD silently ignores the NIC override and leaves
+   *  the VM on its template-original (often nonexistent, in the target VDC) network. */
+  private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string, networkAssignments?: Array<{ innerNetwork: string; containerNetwork: string }>): string {
     const vmName = vmConfig.vmName ?? fallbackName;
     const instSections: string[] = [];
 
@@ -1156,8 +1205,7 @@ export class ZettagridClient {
         const idx = nc.index ?? i;
         const resolvedMode = nc.ipMode ?? 'POOL';
         const ipLine = resolvedMode === 'MANUAL' && nc.ipAddress ? `<IpAddress>${nc.ipAddress}</IpAddress>` : '';
-        const resolvedNetName = networkNameMap?.get(nc.networkName) ?? nc.networkName;
-        return `<NetworkConnection network="${resolvedNetName}">
+        return `<NetworkConnection network="${nc.networkName}">
                 <NetworkConnectionIndex>${idx}</NetworkConnectionIndex>
                 ${ipLine}
                 <IsConnected>true</IsConnected>
@@ -1221,21 +1269,15 @@ export class ZettagridClient {
     // SourcedCompositionItemParam does not support VmSpecSection.
     // Resize CPU/memory/disk post-instantiation via PUT /vApp/vm-{id}/vmSpecSection.
 
-    // NetworkAssignment — maps the template VM's existing NIC networks to vApp networks.
-    // vCD uses these to connect the VM's NICs to the correct vApp network; without them
-    // the NetworkConnectionSection override in InstantiationParams is silently ignored
-    // and the VM falls back to the template's original network (e.g. "VM Network").
-    let networkAssignmentsXml = '';
-    // NetworkAssignment is only needed when vApp network names differ from template network
-    // names. When networkNameMap is populated we already use template names in both the vApp
-    // NetworkConfig and the NIC override, so no remapping is required.
-    if (templateNetworks?.length && vmConfig.networkConnections?.length && !(networkNameMap?.size)) {
-      const targetNames = vmConfig.networkConnections.map(nc => nc.networkName);
-      networkAssignmentsXml = templateNetworks.map((templateNet, i) => {
-        const innerNet = targetNames[i] ?? targetNames[0] ?? templateNet;
-        return `\n        <NetworkAssignment networkName="${templateNet}" innerNetwork="${innerNet}"/>`;
-      }).join('');
-    }
+    // NetworkAssignment — maps the template VM's existing NIC network (innerNetwork) to the
+    // vApp network it should connect to (containerNetwork). vCD's schema for NetworkAssignment
+    // takes ONLY innerNetwork + containerNetwork — there is no "networkName" attribute. Without
+    // a NetworkAssignment for a pair that differs, the NetworkConnectionSection override above is
+    // silently ignored and the VM stays on its template-original network (e.g. "VM Network"),
+    // which typically doesn't exist as a network in the target vApp/VDC.
+    const networkAssignmentsXml = (networkAssignments ?? [])
+      .map(a => `\n        <NetworkAssignment innerNetwork="${a.innerNetwork}" containerNetwork="${a.containerNetwork}"/>`)
+      .join('');
 
     return `
     <SourcedItem>
@@ -1459,7 +1501,17 @@ export class ZettagridClient {
         sourcedItemsXml = templateVms.map(({ href, templateNetworks }, i) => {
           const cfg = resolvedVmConfigs[i] ?? resolvedVmConfigs[0] ?? {};
           const fallbackName = templateVms.length === 1 ? vappName : `${vappName}-${i + 1}`;
-          return this.buildSourcedItemXml(href, cfg, fallbackName, templateNetworks, networkNameMap);
+          // Rename NIC targets to the template's own network name when networkNameMap has an
+          // entry — the vApp-level NetworkConfig was auto-populated under that same name above,
+          // so the NIC override already matches and no NetworkAssignment is needed.
+          const renamedCfg: VAppVmConfig = cfg.networkConnections?.length
+            ? { ...cfg, networkConnections: cfg.networkConnections.map(nc => ({
+                ...nc,
+                networkName: networkNameMap.get(nc.networkName) ?? nc.networkName,
+              })) }
+            : cfg;
+          const networkAssignments = this.computeNetworkAssignments(templateNetworks, renamedCfg.networkConnections);
+          return this.buildSourcedItemXml(href, renamedCfg, fallbackName, networkAssignments);
         }).join('');
       }
 
@@ -1599,7 +1651,30 @@ export class ZettagridClient {
       }
 
       const { href: firstHref, templateNetworks: firstTemplateNetworks } = vmHrefs[0]!;
-      const sourcedItemXml = this.buildSourcedItemXml(firstHref, finalVmConfig, vmName, firstTemplateNetworks);
+
+      // Resolve NetworkAssignment mappings. Unlike createVApp (a fresh vApp with no existing
+      // networks), an existing vApp already has its own NetworkConfigSection — recomposeVApp's
+      // schema has no top-level InstantiationParams/NetworkConfigSection to bridge a brand-new
+      // network in (unlike instantiateVAppTemplate), so containerNetwork must reference a
+      // network the vApp already has. Fail clearly rather than emit XML vCD will reject.
+      if (finalVmConfig.networkConnections?.length && firstTemplateNetworks.length) {
+        const existingVappNetworks = await this.fetchVAppNetworkNames(vappId, zoneId);
+        const missing = finalVmConfig.networkConnections.filter(nc => !existingVappNetworks.has(nc.networkName));
+
+        if (missing.length > 0) {
+          return this.formatMcpResponse(
+            { existingVappNetworks: [...existingVappNetworks], missingNetworks: missing.map(m => m.networkName) },
+            zone,
+            {
+              code: 'NETWORK_NOT_CONFIGURED_ON_VAPP',
+              message: `Network(s) ${missing.map(m => `"${m.networkName}"`).join(', ')} are not configured on this vApp (existing: ${[...existingVappNetworks].join(', ') || 'none'}). Add the network to the vApp first (e.g. via the vCD portal), then retry with a networkName from data.existingVappNetworks.`,
+            }
+          );
+        }
+      }
+
+      const networkAssignments = this.computeNetworkAssignments(firstTemplateNetworks, finalVmConfig.networkConnections);
+      const sourcedItemXml = this.buildSourcedItemXml(firstHref, finalVmConfig, vmName, networkAssignments);
 
       // name attribute is intentionally omitted — avoids renaming the parent vApp
       const payload = `<?xml version="1.0" encoding="UTF-8"?>

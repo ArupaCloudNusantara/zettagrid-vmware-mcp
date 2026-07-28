@@ -14,7 +14,7 @@ const log = makeLogger('vapp-catalog');
 let client;
 
 // Track resources created during tests so teardown can clean up
-const created = { vappId: null };
+const created = { vappId: null, vdcId: null };
 
 beforeAll(async () => {
   log.separator('vApp & Catalog Suite — Setup');
@@ -112,12 +112,22 @@ describe('UC-VA-001 — Deploy a vApp from Catalog Template', () => {
     const vdcId = vdc?.id || vdc?.vdcId;
     if (!vdcId) { log.warn(`VDC "${cfg.fixtures.vdcName}" not found — skipping create_vapp`); return; }
     log.info(`Using vdcId: ${vdcId}`);
+    created.vdcId = vdcId;
+
+    // Explicitly attach a routed org network (rather than relying on createVApp's zero-config
+    // auto-discovery) so the vApp has a real, working network for add_vm_to_vapp's
+    // networkConnections regression test (UC-VA-002) to attach to.
+    const nets  = toArray(await client.call('list_org_networks', {}));
+    const rnet  = nets.find(n => Number(n.linkType) === 1);
+    const vmConfigs = rnet ? [{ networkConnections: [{ networkName: rnet.name, ipMode: 'DHCP' }] }] : [];
+    if (!rnet) log.warn(`${UC}: no routed org network found — creating vApp without a network`);
 
     const vappName = `test-vapp-${Date.now()}`;
     const result = await client.call('create_vapp', {
       vappName,
       templateId,
       vdcId,
+      ...(vmConfigs.length ? { instantiationParams: { vmConfigs } } : {}),
     }, cfg.timeouts.taskPoll);
 
     const taskId = get(result, 'data', 'taskId') || get(result, 'taskId') || get(result, 'task', 'id');
@@ -198,6 +208,85 @@ describe('UC-VA-002 — Add VM to Existing vApp from Catalog', () => {
     const vms    = toArray(await client.call('list_vms', { vappId }));
     log.result(UC, 'VM added to vApp', vms.length > 0, `vmCount=${vms.length}`);
     expect(vms.length).toBeGreaterThan(0);
+  });
+
+  // ─── Regression: B1/B2 — add_vm_to_vapp with an explicit networkConnections
+  // override used to fail schema validation (invalid "networkName" attribute on
+  // NetworkAssignment) or, if the override was omitted to dodge that, silently
+  // leave the VM on the template's own (nonexistent-in-VDC) network. ───────────
+  test('add_vm_to_vapp with explicit networkConnections is accepted (regression: B1 NetworkAssignment schema error)', async () => {
+    log.separator(UC + ': add_vm_to_vapp with networkConnections (B1/B2 regression)');
+    const vappId = created.vappId;
+    const vdcId  = created.vdcId;
+    if (!vappId || !vdcId) { log.warn(`${UC}: no vappId/vdcId from UC-VA-001 — skipping`); return; }
+
+    // Use the network name the vApp is ALREADY configured with — discovered from a live VM's
+    // NIC (the one created in UC-VA-001) rather than guessed from list_org_networks, since
+    // add_vm_to_vapp can only attach to a network the vApp already has (it cannot bridge in a
+    // brand-new one — recomposeVApp's schema has no NetworkConfigSection for that, unlike
+    // instantiateVAppTemplate). This exercises the real reported scenario: an existing vApp
+    // whose network the caller wants a new VM connected to.
+    const existingVms = toArray(await client.call('list_vms', { vappId }));
+    let networkName;
+    for (const v of existingVms) {
+      const vm  = get(await client.call('get_vm', { vmId: v.id }), 'data') || {};
+      const nic = toArray(vm.networkConnections).find(n => n.network && n.network.toLowerCase() !== 'none');
+      if (nic) { networkName = nic.network; break; }
+    }
+    if (!networkName) { log.warn(`${UC}: no existing VM with a real (non-"none") network found on the vApp — skipping`); return; }
+    log.info(`Using vApp's existing network: ${networkName}`);
+
+    const cats = toArray(await client.call('list_catalogs', {}));
+    let match;
+    for (const cat of cats) {
+      const items = toArray(await client.call('list_catalog_items', { catalogId: cat.id || cat.catalogId }));
+      match = items.find(i => (i.entityType || '').toLowerCase().includes('vapptemplate')) || match;
+      if (match) break;
+    }
+    const templateIdForNet = match?.entityHref || match?.href;
+    expect(templateIdForNet).toBeTruthy();
+
+    const vmName = `test-vm-net-${Date.now()}`;
+    const result = await client.call('add_vm_to_vapp', {
+      vappId,
+      templateId: templateIdForNet,
+      vmName,
+      vdcId,
+      networkConnections: [{ networkName, ipMode: 'DHCP' }],
+    }, cfg.timeouts.taskPoll);
+
+    const succeeded = result?.success !== false;
+    log.result(UC, 'add_vm_to_vapp with networkConnections accepted', succeeded, `error="${result?.error?.message || ''}"`);
+    expect(succeeded).toBe(true);
+
+    const taskId = get(result, 'data', 'taskId') || get(result, 'taskId') || get(result, 'task', 'id');
+    if (taskId) await waitForTask(client, taskId, cfg.timeouts.taskPoll);
+
+    created.vmWithNetworkName = vmName;
+    created.vmWithNetworkTarget = networkName;
+  });
+
+  test('VM added with networkConnections has a NIC actually connected to the requested network (regression: B2 template network not mapped)', async () => {
+    log.separator(UC + ': verify NIC network mapping (B2 regression)');
+    const vappId = created.vappId;
+    if (!vappId || !created.vmWithNetworkName) { log.warn(`${UC}: no VM from the B1/B2 regression test — skipping`); return; }
+
+    const vms   = toArray(await client.call('list_vms', { vappId }));
+    const added = vms.find(v => v.name === created.vmWithNetworkName);
+    if (!added?.id) { log.warn(`${UC}: could not find VM "${created.vmWithNetworkName}" — skipping`); return; }
+
+    const vm     = get(await client.call('get_vm', { vmId: added.id }), 'data') || {};
+    const nics   = toArray(vm.networkConnections);
+    const hasNic = nics.length > 0;
+    log.result(UC, 'new VM has at least one NIC', hasNic, `nicCount=${nics.length}`);
+    expect(hasNic).toBe(true);
+
+    // The NIC must be connected to the requested org network — not left on the template's own
+    // internal network name (e.g. "VM Network"), which is the exact B2 failure mode.
+    const onRequestedNetwork = nics.some(n => (n.network || n.networkName) === created.vmWithNetworkTarget);
+    log.result(UC, `NIC connected to requested network "${created.vmWithNetworkTarget}"`, onRequestedNetwork,
+      `actual=${JSON.stringify(nics.map(n => n.network || n.networkName))}`);
+    expect(onRequestedNetwork).toBe(true);
   });
 });
 
