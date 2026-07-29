@@ -6,6 +6,29 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.3.0] — 2026-07-29
+
+Field-reported defect fixes from a live multi-VM/multi-disk deployment scenario (deploying VMs into an existing vApp with static IPs and per-VM storage/network requirements). 149/149 integration tests passing (up from 133 in 1.2.0).
+
+### Fixed
+- `add_vm_to_vapp`: any call passing `networkConnections` failed with an invalid `NetworkAssignment` schema violation (`networkName` is not a valid attribute on that element) — the tool now emits the correct `innerNetwork`/`containerNetwork` pair, only when the names actually differ
+- `add_vm_to_vapp`: omitting `networkConnections` to work around the above left the new VM on the template's own disconnected network reference, which doesn't exist in the target VDC — the tool now resolves against the vApp's actual configured networks and fails clearly (`NETWORK_NOT_CONFIGURED_ON_VAPP`) instead of emitting XML vCD will reject
+- `add_vm_to_vapp`: a failed recompose could leave a partially-created "orphan" VM with no way to discover its id — the error response now returns the orphan's VM id when one exists, and the success message documents the same cleanup path for the async-task-failure case
+- VDC/vApp friendly names (e.g. `"DC_1138718"`) passed to `show_vdc_resources`, `get_vdc`, `list_vapps`, or `list_vms` produced a generic HTTP 500/400 that read like a permissions failure instead of resolving to the underlying UUID
+- `create_vapp`: per-field documentation for `cpuCount`/`memoryMB`/`diskSizeMB` read as if they were auto-applied during instantiation; reworded to make explicit that the caller must call `update_vm_cpu`/`update_vm_memory`/`update_vm_disk` themselves afterward
+
+### Added
+- `delete_vm` — remove a single VM from its vApp without touching the vApp's other VMs (discovers the parent vApp automatically)
+- `delete_vapp`: guard requiring `force: true` when the vApp contains more than one VM — previously the only delete tool reachable to remove a single bad VM was the one that destroys the entire vApp
+- `add_vm_disk` — add a brand-new, independent disk to a VM (e.g. a data/DB disk separate from the OS disk); distinct from `update_vm_disk`, which only resizes the existing boot disk
+- `update_vm_network`: `addNic: true` to append a new NIC instead of only ever editing an existing one by index
+- `adapterType` (`VMXNET3`/`E1000`/`E1000E`) on `create_vapp`, `add_vm_to_vapp`, and `update_vm_network`'s `addNic` path — settable when a NIC is created; vCD does not permit changing an already-existing NIC's adapter type (confirmed against the live API, not a limitation of this tool)
+- `add_vm_to_vapp`: `storageProfileHref`/`storageProfileName` parameters, matching `create_vapp`
+- `get_vm`: now returns storage profile, NIC adapter type, CPU/memory hot-add flags, and OVF/guest properties (e.g. verifying whether SSH key injection actually landed)
+- Opt-in `waitForTask`/`timeoutMs` parameters on the highest-value mutating tools (power/lifecycle operations, resize, vApp/VM create/delete, snapshots) — polls the task to completion internally before responding instead of requiring a separate `get_task` round-trip; default behavior (bare task returned immediately) is unchanged for existing callers
+
+---
+
 ## [1.1.0] — 2026-06-22
 
 **Fork release — based on [Zettagrid/zettagrid-vmware-mcp](https://github.com/Zettagrid/zettagrid-vmware-mcp) v1.0.0**

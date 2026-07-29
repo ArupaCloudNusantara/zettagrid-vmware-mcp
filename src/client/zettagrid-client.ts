@@ -26,7 +26,8 @@ import {
   PaginationParams,
   ListResponse,
   VAppInstantiationParams,
-  VAppVmConfig
+  VAppVmConfig,
+  VAppNetworkConnection
 } from '../types.js';
 import {
   parseVdcRecords,
@@ -37,6 +38,7 @@ import {
   parseEntityAttributes,
   normalizeIdFromHrefOrId,
   parseVmDetails,
+  parseProductSectionProperties,
   parseVAppDetails,
   parseTaskResponse
 } from '../utils/xml-parser.js';
@@ -66,6 +68,43 @@ export class ZettagridClient {
   private zoneManager: ZoneManager;
   private tokenManager: TokenManager;
   private zoneAuth: Map<string, ZoneAuth> = new Map();
+
+  /** Bare-UUID test — used to tell an already-resolved id apart from a friendly name that
+   *  still needs a list_vdcs/list_vapps lookup. */
+  private isUuidLike(s: string): boolean {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s);
+  }
+
+  /** Resolve a VDC identifier that may be a bare UUID, urn:vcloud:vdc:UUID, an href, or a
+   *  friendly VDC name (e.g. "DC_1139703") into the bare UUID VCD's /query filters and REST
+   *  paths require. Passing a friendly name straight through (the pre-fix behavior) produces a
+   *  generic HTTP 500/400 from VCD that reads like a permissions failure, not an input error.
+   *  UUID/URN/href forms resolve locally with no extra API call; a name costs one list_vdcs call. */
+  private async resolveVdcId(vdcIdOrName: string, zoneId?: string): Promise<string> {
+    const normalized = normalizeIdFromHrefOrId(vdcIdOrName);
+    const stripped = normalized.startsWith('urn:vcloud:vdc:') ? normalized.slice(15) : normalized;
+    if (this.isUuidLike(stripped)) return stripped;
+
+    const vdcs = await this.listVdcs(zoneId);
+    const match = vdcs.data?.items?.find(v => v.name === vdcIdOrName);
+    if (!match?.id) {
+      throw new Error(`VDC "${vdcIdOrName}" not found by name — use list_vdcs to find the correct id.`);
+    }
+    return String(match.id);
+  }
+
+  /** Same resolution as resolveVdcId, for vApp identifiers (list_vapps lookup by name). */
+  private async resolveVAppId(vAppIdOrName: string, zoneId?: string): Promise<string> {
+    const stripped = vappUuid(normalizeIdFromHrefOrId(vAppIdOrName));
+    if (this.isUuidLike(stripped)) return stripped;
+
+    const vapps = await this.listVApps(undefined, zoneId);
+    const match = vapps.data?.items?.find(v => v.name === vAppIdOrName);
+    if (!match?.id) {
+      throw new Error(`vApp "${vAppIdOrName}" not found by name — use list_vapps to find the correct id.`);
+    }
+    return String(match.id);
+  }
 
   constructor() {
     this.zoneManager = new ZoneManager();
@@ -452,9 +491,10 @@ export class ZettagridClient {
    */
   async getVdc(vdcId: string, zoneId?: string): Promise<McpToolResponse<Vdc>> {
     try {
+      const resolvedVdcId = await this.resolveVdcId(vdcId, zoneId);
       const response = await this.makeRequest<string>({
         method: 'GET',
-        url: `/vdc/${vdcId}`
+        url: `/vdc/${resolvedVdcId}`
       }, zoneId);
 
       const parsed = parseEntityAttributes(response.data, /<(\w+:)?Vdc\b[^>]*>/);
@@ -474,9 +514,9 @@ export class ZettagridClient {
    * @param zoneId - Optional zone ID
    */
   async showVdcResources(vdcIdOrHref: string, zoneId?: string): Promise<McpToolResponse<VdcResourceSummary>> {
-    const vdcId = normalizeIdFromHrefOrId(vdcIdOrHref);
-    
     try {
+      const vdcId = await this.resolveVdcId(vdcIdOrHref, zoneId);
+
       // Get VDC details directly - this contains ComputeCapacity XML
       const vdcResponse = await this.makeRequest<string>({
         method: 'GET',
@@ -608,8 +648,8 @@ export class ZettagridClient {
   async listVApps(vdcId?: string, zoneId?: string, pagination?: PaginationParams): Promise<McpToolResponse<ListResponse<VApp>>> {
     try {
       const params: Record<string, string> = { type: 'vApp' };
-      
-      if (vdcId) params.filter = `vdc==${vdcId}`;
+
+      if (vdcId) params.filter = `vdc==${await this.resolveVdcId(vdcId, zoneId)}`;
       if (pagination) {
         if (pagination.page) params.page = pagination.page.toString();
         if (pagination.pageSize) params.pageSize = pagination.pageSize.toString();
@@ -778,9 +818,10 @@ export class ZettagridClient {
   async listVMs(vAppId?: string, zoneId?: string, pagination?: PaginationParams): Promise<McpToolResponse<ListResponse<Vm>>> {
     try {
       const params: Record<string, string> = { type: 'vm' };
-      
-      // VCD query filter requires bare UUID — passing a full URN silently returns 0 results
-      if (vAppId) params.filter = `container==${vappUuid(vAppId)}`;
+
+      // VCD query filter requires bare UUID — passing a full URN silently returns 0 results.
+      // resolveVAppId also accepts a friendly vApp name (extra list_vapps lookup) or href.
+      if (vAppId) params.filter = `container==${await this.resolveVAppId(vAppId, zoneId)}`;
       if (pagination) {
         if (pagination.page) params.page = pagination.page.toString();
         if (pagination.pageSize) params.pageSize = pagination.pageSize.toString();
@@ -835,18 +876,27 @@ export class ZettagridClient {
    */
   async getVM(vmId: string, zoneId?: string): Promise<McpToolResponse<Vm>> {
     try {
-      // Fetch entity XML and disk sub-resource in parallel — the sub-resource is authoritative
-      // for current disk sizes after hot-resize (the full entity XML may lag behind).
+      // Fetch entity XML, disk sub-resource, and OVF product-section properties in parallel.
+      // The disk sub-resource is authoritative for current disk sizes after hot-resize (the
+      // full entity XML may lag behind); productSections isn't in the entity XML at all — it's
+      // the only way to verify what a VM was actually configured with (e.g. SSH key injection).
       const uuid = vmUuid(vmId);
       const zone = zoneId || this.zoneManager.getConfig().defaultZone;
-      const [entityResp, diskResp] = await Promise.all([
+      const [entityResp, diskResp, productSectionsResp] = await Promise.all([
         this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId),
         this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}/virtualHardwareSection/disks` }, zoneId)
+          .catch(() => null),
+        this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}/productSections` }, zoneId)
           .catch(() => null),
       ]);
 
       // parseVmDetails extracts root attributes + CPU/RAM/IP from child XML elements
       const parsed = parseVmDetails(entityResp.data);
+
+      if (productSectionsResp) {
+        const ovfProperties = parseProductSectionProperties(productSectionsResp.data as unknown as string);
+        if (ovfProperties.length > 0) parsed.ovfProperties = ovfProperties;
+      }
 
       // Override disk info with sub-resource data (avoids stale entity XML after hot-resize).
       // Uses the same <Item>...</Item> pattern as updateVMDisk — no namespace prefix in this endpoint.
@@ -1136,11 +1186,59 @@ export class ZettagridClient {
     }
   }
 
+  /** Fetch the set of network names already configured on an existing vApp's NetworkConfigSection
+   *  (excluding the special "none" entry). Used by addVMToVApp to decide whether a requested
+   *  network needs to be newly bridged in via InstantiationParams, or already exists on the vApp
+   *  and can be referenced directly as a NetworkAssignment containerNetwork. */
+  private async fetchVAppNetworkNames(vappId: string, zoneId?: string): Promise<Set<string>> {
+    try {
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vApp/vapp-${vappUuid(vappId)}`
+      }, zoneId);
+      const xml = response.data as unknown as string;
+      const names = new Set<string>();
+      const re = /<NetworkConfig\b[^>]*\bnetworkName="([^"]+)"/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(xml)) !== null) {
+        const name = m[1];
+        if (name && name.toLowerCase() !== 'none') names.add(name);
+      }
+      return names;
+    } catch {
+      return new Set<string>();
+    }
+  }
+
+  /** Compute {innerNetwork, containerNetwork} NetworkAssignment pairs for a VM whose template
+   *  NIC network name doesn't match the vApp network name it should attach to. Callers that pre-
+   *  rename networkConnections to already match the template name (see createVApp) naturally get
+   *  an empty result here, since innerNetwork === containerNetwork for every pair.
+   *  "none" (the template NIC was never connected to anything at capture time) is excluded too —
+   *  it's not a real OVF-declared network name, so vCD rejects a NetworkAssignment referencing it
+   *  as innerNetwork. A disconnected NIC is attached directly via the NetworkConnectionSection
+   *  override alone; there's nothing to remap away from. */
+  private computeNetworkAssignments(
+    templateNetworks: string[],
+    networkConnections?: VAppNetworkConnection[]
+  ): Array<{ innerNetwork: string; containerNetwork: string }> {
+    if (!templateNetworks.length || !networkConnections?.length) return [];
+    const targetNames = networkConnections.map(nc => nc.networkName);
+    return templateNetworks
+      .map((innerNetwork, i) => ({
+        innerNetwork,
+        containerNetwork: targetNames[i] ?? targetNames[0] ?? innerNetwork,
+      }))
+      .filter(a => a.innerNetwork !== a.containerNetwork && a.innerNetwork.toLowerCase() !== 'none');
+  }
+
   /** Build a complete SourcedItem XML block for one VM.
-   *  templateNetworks: NIC network names the template VM already has (e.g. ["VM Network"]).
-   *  When provided, NetworkAssignment elements are added to remap template NICs to the
-   *  user-specified vApp networks — without these vCD silently ignores the NIC override. */
-  private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string, templateNetworks?: string[], networkNameMap?: Map<string, string>): string {
+   *  networkAssignments: precomputed {innerNetwork, containerNetwork} pairs — innerNetwork is the
+   *  template VM's existing NIC network name (e.g. "VM Network"), containerNetwork is the vApp
+   *  network it should be remapped to. Only needed when the two names differ; without a
+   *  NetworkAssignment for a differing pair, vCD silently ignores the NIC override and leaves
+   *  the VM on its template-original (often nonexistent, in the target VDC) network. */
+  private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string, networkAssignments?: Array<{ innerNetwork: string; containerNetwork: string }>): string {
     const vmName = vmConfig.vmName ?? fallbackName;
     const instSections: string[] = [];
 
@@ -1156,12 +1254,16 @@ export class ZettagridClient {
         const idx = nc.index ?? i;
         const resolvedMode = nc.ipMode ?? 'POOL';
         const ipLine = resolvedMode === 'MANUAL' && nc.ipAddress ? `<IpAddress>${nc.ipAddress}</IpAddress>` : '';
-        const resolvedNetName = networkNameMap?.get(nc.networkName) ?? nc.networkName;
-        return `<NetworkConnection network="${resolvedNetName}">
+        // NetworkAdapterType must be the LAST child of NetworkConnection (after
+        // IpAddressAllocationMode/SecondaryIpAddressAllocationMode) — confirmed via live
+        // vCD response inspection, not documented anywhere obvious.
+        const adapterLine = nc.adapterType ? `<NetworkAdapterType>${nc.adapterType}</NetworkAdapterType>` : '';
+        return `<NetworkConnection network="${nc.networkName}">
                 <NetworkConnectionIndex>${idx}</NetworkConnectionIndex>
                 ${ipLine}
                 <IsConnected>true</IsConnected>
                 <IpAddressAllocationMode>${resolvedMode}</IpAddressAllocationMode>
+                ${adapterLine}
             </NetworkConnection>`;
       }).join('\n            ');
       instSections.push(`<NetworkConnectionSection>
@@ -1221,21 +1323,15 @@ export class ZettagridClient {
     // SourcedCompositionItemParam does not support VmSpecSection.
     // Resize CPU/memory/disk post-instantiation via PUT /vApp/vm-{id}/vmSpecSection.
 
-    // NetworkAssignment — maps the template VM's existing NIC networks to vApp networks.
-    // vCD uses these to connect the VM's NICs to the correct vApp network; without them
-    // the NetworkConnectionSection override in InstantiationParams is silently ignored
-    // and the VM falls back to the template's original network (e.g. "VM Network").
-    let networkAssignmentsXml = '';
-    // NetworkAssignment is only needed when vApp network names differ from template network
-    // names. When networkNameMap is populated we already use template names in both the vApp
-    // NetworkConfig and the NIC override, so no remapping is required.
-    if (templateNetworks?.length && vmConfig.networkConnections?.length && !(networkNameMap?.size)) {
-      const targetNames = vmConfig.networkConnections.map(nc => nc.networkName);
-      networkAssignmentsXml = templateNetworks.map((templateNet, i) => {
-        const innerNet = targetNames[i] ?? targetNames[0] ?? templateNet;
-        return `\n        <NetworkAssignment networkName="${templateNet}" innerNetwork="${innerNet}"/>`;
-      }).join('');
-    }
+    // NetworkAssignment — maps the template VM's existing NIC network (innerNetwork) to the
+    // vApp network it should connect to (containerNetwork). vCD's schema for NetworkAssignment
+    // takes ONLY innerNetwork + containerNetwork — there is no "networkName" attribute. Without
+    // a NetworkAssignment for a pair that differs, the NetworkConnectionSection override above is
+    // silently ignored and the VM stays on its template-original network (e.g. "VM Network"),
+    // which typically doesn't exist as a network in the target vApp/VDC.
+    const networkAssignmentsXml = (networkAssignments ?? [])
+      .map(a => `\n        <NetworkAssignment innerNetwork="${a.innerNetwork}" containerNetwork="${a.containerNetwork}"/>`)
+      .join('');
 
     return `
     <SourcedItem>
@@ -1459,7 +1555,17 @@ export class ZettagridClient {
         sourcedItemsXml = templateVms.map(({ href, templateNetworks }, i) => {
           const cfg = resolvedVmConfigs[i] ?? resolvedVmConfigs[0] ?? {};
           const fallbackName = templateVms.length === 1 ? vappName : `${vappName}-${i + 1}`;
-          return this.buildSourcedItemXml(href, cfg, fallbackName, templateNetworks, networkNameMap);
+          // Rename NIC targets to the template's own network name when networkNameMap has an
+          // entry — the vApp-level NetworkConfig was auto-populated under that same name above,
+          // so the NIC override already matches and no NetworkAssignment is needed.
+          const renamedCfg: VAppVmConfig = cfg.networkConnections?.length
+            ? { ...cfg, networkConnections: cfg.networkConnections.map(nc => ({
+                ...nc,
+                networkName: networkNameMap.get(nc.networkName) ?? nc.networkName,
+              })) }
+            : cfg;
+          const networkAssignments = this.computeNetworkAssignments(templateNetworks, renamedCfg.networkConnections);
+          return this.buildSourcedItemXml(href, renamedCfg, fallbackName, networkAssignments);
         }).join('');
       }
 
@@ -1599,7 +1705,30 @@ export class ZettagridClient {
       }
 
       const { href: firstHref, templateNetworks: firstTemplateNetworks } = vmHrefs[0]!;
-      const sourcedItemXml = this.buildSourcedItemXml(firstHref, finalVmConfig, vmName, firstTemplateNetworks);
+
+      // Resolve NetworkAssignment mappings. Unlike createVApp (a fresh vApp with no existing
+      // networks), an existing vApp already has its own NetworkConfigSection — recomposeVApp's
+      // schema has no top-level InstantiationParams/NetworkConfigSection to bridge a brand-new
+      // network in (unlike instantiateVAppTemplate), so containerNetwork must reference a
+      // network the vApp already has. Fail clearly rather than emit XML vCD will reject.
+      if (finalVmConfig.networkConnections?.length && firstTemplateNetworks.length) {
+        const existingVappNetworks = await this.fetchVAppNetworkNames(vappId, zoneId);
+        const missing = finalVmConfig.networkConnections.filter(nc => !existingVappNetworks.has(nc.networkName));
+
+        if (missing.length > 0) {
+          return this.formatMcpResponse(
+            { existingVappNetworks: [...existingVappNetworks], missingNetworks: missing.map(m => m.networkName) },
+            zone,
+            {
+              code: 'NETWORK_NOT_CONFIGURED_ON_VAPP',
+              message: `Network(s) ${missing.map(m => `"${m.networkName}"`).join(', ')} are not configured on this vApp (existing: ${[...existingVappNetworks].join(', ') || 'none'}). Add the network to the vApp first (e.g. via the vCD portal), then retry with a networkName from data.existingVappNetworks.`,
+            }
+          );
+        }
+      }
+
+      const networkAssignments = this.computeNetworkAssignments(firstTemplateNetworks, finalVmConfig.networkConnections);
+      const sourcedItemXml = this.buildSourcedItemXml(firstHref, finalVmConfig, vmName, networkAssignments);
 
       // name attribute is intentionally omitted — avoids renaming the parent vApp
       const payload = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1616,15 +1745,34 @@ export class ZettagridClient {
 
       const task = parseTaskResponse(response.data as unknown as string);
       return this.formatMcpResponse(
-        { ...task, vappId, vmName, message: 'VM add task queued. Use get_task to poll for completion, then list_vms to find the new VM ID.' },
+        {
+          ...task, vappId, vmName,
+          message: 'VM add task queued. Use get_task to poll for completion. If the task ends in error, ' +
+            `list_vms may still show a partially-created VM named "${vmName}" — use delete_vm to remove it before retrying.`,
+        },
         zone
       );
     } catch (error) {
-      return this.formatMcpResponse({}, zone, {
-        code: 'ADD_VM_TO_VAPP_ERROR',
-        message: error instanceof Error ? error.message : 'Failed to add VM to vApp',
-        details: error
-      });
+      // The recompose can fail after partially creating the VM (e.g. a network-mismatch
+      // rejection arriving after the VM object was already composed) — the same orphan-VM
+      // problem reported as H1. Look it up so the caller has an id to clean up with delete_vm
+      // instead of being stuck with only delete_vapp (which would destroy the whole vApp).
+      let orphanVmId: string | undefined;
+      try {
+        const vms = await this.listVMs(vappId, zoneId);
+        orphanVmId = vms.data?.items?.find(v => v.name === vmName)?.id;
+      } catch { /* best-effort only — don't let this mask the original error */ }
+
+      return this.formatMcpResponse(
+        orphanVmId ? { orphanVmId } : {},
+        zone,
+        {
+          code: 'ADD_VM_TO_VAPP_ERROR',
+          message: (error instanceof Error ? error.message : 'Failed to add VM to vApp') +
+            (orphanVmId ? ` A VM named "${vmName}" (id: ${orphanVmId}) was partially created — use delete_vm to remove it before retrying.` : ''),
+          details: error
+        }
+      );
     }
   }
 
@@ -2940,15 +3088,218 @@ export class ZettagridClient {
   }
 
   /**
+   * Force a VM to powered-off, handling the common case where a VM inside a "deployed" vApp
+   * rejects an individual power-off (VAPP_DEPLOY 400) by falling back through VM-level undeploy,
+   * then vApp-level undeploy, then powering off every sibling VM before vApp undeploy. Polls
+   * until the VM actually reports powered-off (status="8") or throws after 120s.
+   * Returns the parent vApp's UUID when a vApp-level undeploy path was used (so the caller can
+   * restore power at the vApp level afterward), or null when a plain VM-level power-off sufficed.
+   * Used by addVMDisk; kept separate from updateVMDisk's own inline copy of this same fallback
+   * rather than refactoring that already-proven code path.
+   */
+  private async forcePowerOffVM(uuid: string, zoneId?: string): Promise<string | null> {
+    const undeployXml = '<?xml version="1.0" encoding="UTF-8"?>\n<UndeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">\n  <UndeployPowerAction>powerOff</UndeployPowerAction>\n</UndeployVAppParams>';
+    const undeployHdrs = { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' };
+    let parentVappUuid: string | null = null;
+    try {
+      await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOff` }, zoneId);
+    } catch (vmPowerOffErr) {
+      const errMsg = vmPowerOffErr instanceof Error ? vmPowerOffErr.message : String(vmPowerOffErr);
+      if (!errMsg.includes('VAPP_DEPLOY') && !errMsg.includes('400')) throw vmPowerOffErr;
+      await new Promise(r => setTimeout(r, 2000));
+      let vmUndeployOk = false;
+      try {
+        await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/action/undeploy`, data: undeployXml, headers: undeployHdrs }, zoneId);
+        vmUndeployOk = true;
+      } catch { /* fall through to vApp undeploy */ }
+      if (!vmUndeployOk) {
+        const vmXmlResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId);
+        const vmXml = vmXmlResp.data as unknown as string;
+        const vappM = /Link[^>]+rel="up"[^>]+href="[^"]*\/vApp\/vapp-([0-9a-f-]{36})/.exec(vmXml)
+                   || /\/vApp\/vapp-([0-9a-f-]{36})/.exec(vmXml);
+        if (!vappM) throw new Error(`VAPP_DEPLOY on VM ${uuid}: cannot locate parent vApp in VM XML`);
+        parentVappUuid = vappM[1] ?? null;
+        try {
+          await this.makeRequest<string>({ method: 'POST', url: `/vApp/vapp-${parentVappUuid}/action/undeploy`, data: undeployXml, headers: undeployHdrs }, zoneId);
+        } catch {
+          const vappXmlResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vapp-${parentVappUuid}` }, zoneId);
+          const vmUuids = [...String(vappXmlResp.data).matchAll(/\/vApp\/vm-([0-9a-f-]{36})/g)].map(m => m[1] as string);
+          const seenVms = new Set<string>();
+          for (const vid of vmUuids) {
+            if (seenVms.has(vid)) continue; seenVms.add(vid);
+            await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${vid}/power/action/powerOff` }, zoneId).catch(() => {});
+          }
+          await new Promise(r => setTimeout(r, 15000));
+          await this.makeRequest<string>({ method: 'POST', url: `/vApp/vapp-${parentVappUuid}/action/undeploy`, data: undeployXml, headers: undeployHdrs }, zoneId);
+        }
+      }
+    }
+
+    let poweredOff = false;
+    const offDeadline = Date.now() + 120_000;
+    while (Date.now() < offDeadline) {
+      await new Promise(r => setTimeout(r, 3000));
+      if (Date.now() >= offDeadline) break;
+      const vmResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId);
+      if ((vmResp.data as unknown as string).includes('status="8"')) { poweredOff = true; break; }
+    }
+    if (!poweredOff) throw new Error(`VM ${uuid} did not power off within 120s`);
+    return parentVappUuid;
+  }
+
+  /** Restore power after forcePowerOffVM — at the vApp level if that's what was undeployed, else the VM itself. */
+  private async restorePowerAfterForceOff(uuid: string, parentVappUuid: string | null, zoneId?: string): Promise<void> {
+    if (parentVappUuid) {
+      await this.makeRequest<string>({ method: 'POST', url: `/vApp/vapp-${parentVappUuid}/power/action/powerOn` }, zoneId).catch(() => {});
+    } else {
+      await this.makeRequest<string>({ method: 'POST', url: `/vApp/vm-${uuid}/power/action/powerOn` }, zoneId).catch(() => {});
+    }
+  }
+
+  /**
+   * Add a brand-new disk to a VM — distinct from updateVMDisk, which only resizes the
+   * existing boot/primary disk. Clones an existing disk's RASD <Item> as a structural
+   * template (vCD's CIM-based virtualHardwareSection schema requires a specific set of
+   * nil-or-valued child elements in a fixed order; reusing a known-valid item avoids
+   * hand-authoring that shape from scratch) and assigns it a fresh InstanceID and the next
+   * free AddressOnParent on the same controller.
+   * Adding a disk is not supported hot in this environment — the VM is powered off first if
+   * needed (same VAPP_DEPLOY-aware fallback as updateVMDisk's Strategy 3) and restored to its
+   * original power state afterward.
+   */
+  async addVMDisk(vmId: string, diskSizeMB: number, storageProfileHref?: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      const uuid = vmUuid(vmId);
+
+      const buildNewDiskXml = (xmlStr: string): { xml: string; instanceId: number } => {
+        const items = xmlStr.match(/<Item>[\s\S]*?<\/Item>/g) ?? [];
+        if (items.length === 0) {
+          throw new Error('No hardware items found in virtualHardwareSection/disks.');
+        }
+
+        // Boot disk (InstanceID 2000) as structural template; largest-capacity disk as fallback.
+        let templateItem = items.find(i => i.includes('<rasd:InstanceID>2000</rasd:InstanceID>'));
+        if (!templateItem) {
+          let maxCap = 0;
+          for (const item of items) {
+            const capM = /\w+:capacity="(\d+)"/.exec(item);
+            if (capM?.[1]) { const cap = parseInt(capM[1], 10); if (cap > maxCap) { maxCap = cap; templateItem = item; } }
+          }
+        }
+        if (!templateItem) {
+          throw new Error('Could not find an existing disk item to use as a template for the new disk.');
+        }
+
+        // Unique InstanceID — one past the highest InstanceID anywhere in the document
+        // (controllers included). Disk InstanceIDs conventionally start at 2000; only
+        // uniqueness matters here.
+        const allIds = [...xmlStr.matchAll(/<rasd:InstanceID>(\d+)<\/rasd:InstanceID>/g)].map(m => parseInt(m[1]!, 10));
+        const newInstanceId = Math.max(2000, ...allIds) + 1;
+
+        // Next free AddressOnParent on the same controller (rasd:Parent) as the template disk.
+        const parentId = /<rasd:Parent>(\d+)<\/rasd:Parent>/.exec(templateItem)?.[1];
+        const siblingAddresses = parentId
+          ? items
+              .filter(i => i.includes(`<rasd:Parent>${parentId}</rasd:Parent>`))
+              .map(i => /<rasd:AddressOnParent>(\d+)<\/rasd:AddressOnParent>/.exec(i)?.[1])
+              .filter((s): s is string => s !== undefined)
+              .map(s => parseInt(s, 10))
+          : [];
+        const newAddress = siblingAddresses.length ? Math.max(...siblingAddresses) + 1 : 0;
+
+        const diskCount = items.filter(i => /<rasd:ResourceType>17<\/rasd:ResourceType>/.test(i)).length;
+        const diskSizeBytes = diskSizeMB * 1024 * 1024;
+        const capacityPrefix = templateItem.match(/(\w+):capacity="\d+"/)?.[1] ?? 'ns10';
+
+        let newItem = templateItem
+          .replace(/<rasd:AddressOnParent>\d+<\/rasd:AddressOnParent>/, `<rasd:AddressOnParent>${newAddress}</rasd:AddressOnParent>`)
+          .replace(/<rasd:ElementName>[^<]*<\/rasd:ElementName>/, `<rasd:ElementName>Hard disk ${diskCount + 1}</rasd:ElementName>`)
+          .replace(/<rasd:InstanceID>\d+<\/rasd:InstanceID>/, `<rasd:InstanceID>${newInstanceId}</rasd:InstanceID>`)
+          .replace(/\w+:capacity="\d+"/, `${capacityPrefix}:capacity="${diskSizeMB}"`)
+          .replace(/(<rasd:VirtualQuantity>)\d+(<\/rasd:VirtualQuantity>)/, `$1${diskSizeBytes}$2`);
+
+        if (storageProfileHref) {
+          newItem = /\w+:storageProfileHref="[^"]*"/.test(newItem)
+            ? newItem.replace(/\w+:storageProfileHref="[^"]*"/, `${capacityPrefix}:storageProfileHref="${storageProfileHref}"`)
+            : newItem.replace(/(\w+:capacity="\d+")/, `${capacityPrefix}:storageProfileHref="${storageProfileHref}" $1`);
+        }
+
+        // Insert right after the template item — RasdItemsList has no elements after the
+        // <Item> list that ordering would conflict with (unlike NetworkConnectionSection's
+        // trailing Link tail, which add-NIC has to avoid).
+        return { xml: xmlStr.replace(templateItem, `${templateItem}\n    ${newItem}`), instanceId: newInstanceId };
+      };
+
+      const getResp = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vApp/vm-${uuid}/virtualHardwareSection/disks`
+      }, zoneId);
+
+      // Built once outside the strategy try/catch — a parsing failure here is a genuine setup
+      // problem, not a "VM needs to be powered off" signal, and shouldn't trigger Strategy 2.
+      const { xml: xml1, instanceId: instanceId1 } = buildNewDiskXml(getResp.data as unknown as string);
+
+      // Strategy 1: direct PUT — works when the VM is already powered off.
+      try {
+        const putResp = await this.makeRequest<string>({
+          method: 'PUT',
+          url: `/vApp/vm-${uuid}/virtualHardwareSection/disks`,
+          data: xml1,
+          headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
+        }, zoneId);
+        return this.formatMcpResponse({ ...parseTaskResponse(putResp.data), vmId, diskSizeMB, instanceId: instanceId1 }, zone);
+      } catch {
+        // Strategy 2: power off (VAPP_DEPLOY-aware), add the disk, restore power.
+        const parentVappUuid = await this.forcePowerOffVM(uuid, zoneId);
+        const getResp2 = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}/virtualHardwareSection/disks` }, zoneId);
+        const { xml: xml2, instanceId } = buildNewDiskXml(getResp2.data as unknown as string);
+        const putResp2 = await this.makeRequest<string>({
+          method: 'PUT',
+          url: `/vApp/vm-${uuid}/virtualHardwareSection/disks`,
+          data: xml2,
+          headers: { 'Content-Type': 'application/vnd.vmware.vcloud.rasdItemsList+xml' }
+        }, zoneId);
+        await this.restorePowerAfterForceOff(uuid, parentVappUuid, zoneId);
+        return this.formatMcpResponse({ ...parseTaskResponse(putResp2.data), vmId, diskSizeMB, instanceId }, zone);
+      }
+    } catch (error) {
+      return this.formatMcpResponse({}, zone, {
+        code: 'ADD_VM_DISK_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to add disk to VM',
+        details: error
+      });
+    }
+  }
+
+  /**
    * Delete a vApp and all VMs inside it.
    * If the vApp is still deployed (deployed=true), automatically undeployes first and
    * polls the undeploy task before issuing DELETE.
    */
-  async deleteVApp(vappId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+  async deleteVApp(vappId: string, zoneId?: string, force?: boolean): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      // Auto-undeploy if vApp is still deployed
       const vappInfo = await this.getVApp(vappId, zoneId);
+
+      // Safety guard: delete_vapp is the only delete tool reachable for a multi-VM vApp, and it
+      // destroys every VM inside — an agent trying to remove one bad VM has no other option.
+      // Require an explicit force:true to proceed when more than one VM would be destroyed.
+      // getVApp's runtime shape (parseVAppDetails) is a bare array of VM summaries, not the
+      // formal VAppChildren{vm,vApp} type — same `as unknown as VApp` looseness getVApp itself uses.
+      const children = ((vappInfo.data as any)?.children ?? []) as Array<{ id?: string; name?: string }>;
+      if (!force && children.length > 1) {
+        return this.formatMcpResponse(
+          { vmCount: children.length, vms: children.map((c: any) => ({ id: c.id, name: c.name })) },
+          zone,
+          {
+            code: 'DELETE_VAPP_MULTIPLE_VMS_GUARD',
+            message: `This vApp contains ${children.length} VMs — delete_vapp would destroy all of them. To remove a single VM, use delete_vm instead. To delete the whole vApp anyway, pass force: true.`,
+          }
+        );
+      }
+
+      // Auto-undeploy if vApp is still deployed
       if (vappInfo.success && vappInfo.data?.deployed === true) {
         const undeployResult = await this.undeployVApp(vappId, zoneId);
         if (!undeployResult.success) {
@@ -2997,6 +3348,81 @@ export class ZettagridClient {
   }
 
   /**
+   * Remove a single VM from its vApp without touching the vApp's other VMs.
+   * Undeploys the VM first if it's still deployed (recomposeVApp's DeleteItem rejects a running
+   * VM), discovers the parent vApp via the VM entity's rel="up" link (no vappId needed from the
+   * caller), then removes it via RecomposeVAppParams/DeleteItem.
+   */
+  async deleteVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
+    try {
+      const uuid = vmUuid(vmId);
+
+      const entityResp = await this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId);
+      const xml = entityResp.data as unknown as string;
+
+      const upLink = xml.match(/<(?:\w+:)?Link\b[^>]*\brel="up"[^>]*\bhref="([^"]+)"/i)?.[1];
+      if (!upLink) {
+        throw new Error('Could not determine the parent vApp for this VM (no rel="up" link in VM entity).');
+      }
+      const parentVappUuid = upLink.split('/vApp/vapp-')[1]?.split(/[?#]/)[0];
+      if (!parentVappUuid) {
+        throw new Error(`Could not parse a vApp id from parent link: ${upLink}`);
+      }
+
+      // Undeploy (power off + release from ESXi) if the VM is still deployed. A VM inside a
+      // deployed vApp can't be removed via recompose while running. Best-effort: if the VM is
+      // already undeployed/powered off, this call fails harmlessly and we proceed anyway.
+      try {
+        const undeployXml = '<?xml version="1.0" encoding="UTF-8"?>\n<UndeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">\n  <UndeployPowerAction>powerOff</UndeployPowerAction>\n</UndeployVAppParams>';
+        const undeployResp = await this.makeRequest<string>({
+          method: 'POST',
+          url: `/vApp/vm-${uuid}/action/undeploy`,
+          data: undeployXml,
+          headers: { 'Content-Type': 'application/vnd.vmware.vcloud.undeployVAppParams+xml' }
+        }, zoneId);
+        const undeployTask = parseTaskResponse(undeployResp.data as unknown as string);
+        if (undeployTask.taskId) {
+          const start = Date.now();
+          while ((Date.now() - start) / 1000 < 120) {
+            await new Promise(r => setTimeout(r, 5000));
+            const t = await this.getTask(undeployTask.taskId, zoneId);
+            const s = t.data?.taskStatus;
+            if (s === 'success' || s === 'error' || s === 'aborted') break;
+          }
+        }
+      } catch { /* already undeployed/powered off — proceed */ }
+
+      const apiEndpoint = this.zoneManager.getZoneConfig(zoneId).apiEndpoint;
+      const vmHref = `${apiEndpoint}/vApp/vm-${uuid}`;
+      const payload = `<?xml version="1.0" encoding="UTF-8"?>
+<RecomposeVAppParams xmlns="http://www.vmware.com/vcloud/v1.5">
+    <Description>VM removed by Zettagrid MCP Server</Description>
+    <DeleteItem href="${vmHref}" />
+</RecomposeVAppParams>`;
+
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vapp-${parentVappUuid}/action/recomposeVApp`,
+        data: payload,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.recomposeVAppParams+xml' }
+      }, zoneId);
+
+      const task = parseTaskResponse(response.data as unknown as string);
+      return this.formatMcpResponse(
+        { ...task, vmId, vappId: parentVappUuid, message: 'VM removal task queued. Use get_task to poll for completion.' },
+        zone
+      );
+    } catch (error) {
+      return this.formatMcpResponse({}, zone, {
+        code: 'DELETE_VM_ERROR',
+        message: error instanceof Error ? error.message : 'Failed to delete VM',
+        details: error
+      });
+    }
+  }
+
+  /**
    * Update a VM NIC's network connection properties (network, IP mode, IP address, primary flag).
    * Works on running or powered-off VMs. Fetches the current NetworkConnectionSection, patches the
    * target NIC by index, and PUTs the section back.
@@ -3009,6 +3435,8 @@ export class ZettagridClient {
       ipMode?: 'DHCP' | 'POOL' | 'MANUAL' | 'NONE';
       ipAddress?: string;
       isPrimary?: boolean;
+      addNic?: boolean;
+      adapterType?: 'VMXNET3' | 'E1000' | 'E1000E';
     },
     zoneId?: string
   ): Promise<McpToolResponse<any>> {
@@ -3020,29 +3448,92 @@ export class ZettagridClient {
       }, zoneId);
 
       let xml = getResp.data as unknown as string;
-      const nicIndex = update.nicIndex ?? 0;
 
       // Extract all <NetworkConnection>...</NetworkConnection> blocks
       const ncPattern = /(<NetworkConnection\b[^>]*>[\s\S]*?<\/NetworkConnection>)/g;
       let m: RegExpExecArray | null;
       const allNcs: string[] = [];
-      let targetNc: string | null = null;
       while ((m = ncPattern.exec(xml)) !== null) {
         const block = m[1] ?? '';
-        if (!block) continue;
-        allNcs.push(block);
-        const idxMatch = block.match(/<NetworkConnectionIndex>(\d+)<\/NetworkConnectionIndex>/);
-        if (idxMatch && idxMatch[1] !== undefined && parseInt(idxMatch[1], 10) === nicIndex) {
-          targetNc = block;
+        if (block) allNcs.push(block);
+      }
+      const existingIndices = allNcs
+        .map(block => block.match(/<NetworkConnectionIndex>(\d+)<\/NetworkConnectionIndex>/)?.[1])
+        .filter((s): s is string => s !== undefined)
+        .map(s => parseInt(s, 10));
+
+      // Add-NIC path: appends a brand-new <NetworkConnection> instead of editing an existing
+      // one. A VM created without a working network (e.g. B2's failure mode) has an empty
+      // NetworkConnectionSection — nothing here to "update", only to add to.
+      if (update.addNic) {
+        if (!update.networkName) {
+          throw new Error('addNic requires networkName to connect the new NIC to.');
         }
+        const newIndex = update.nicIndex ?? (existingIndices.length ? Math.max(...existingIndices) + 1 : 0);
+        if (existingIndices.includes(newIndex)) {
+          throw new Error(`NIC index ${newIndex} already exists — pass a different nicIndex, or omit nicIndex to auto-assign the next available one.`);
+        }
+        const resolvedMode = update.ipMode ?? 'POOL';
+        const ipLine = resolvedMode === 'MANUAL' && update.ipAddress ? `<IpAddress>${update.ipAddress}</IpAddress>` : '';
+        // NetworkAdapterType must be the LAST child of NetworkConnection — confirmed via live
+        // vCD response inspection (same ordering buildSourcedItemXml's NIC template follows).
+        const adapterLine = update.adapterType ? `<NetworkAdapterType>${update.adapterType}</NetworkAdapterType>` : '';
+        const newNicXml = `<NetworkConnection network="${update.networkName}">
+                <NetworkConnectionIndex>${newIndex}</NetworkConnectionIndex>
+                ${ipLine}
+                <IsConnected>true</IsConnected>
+                <IpAddressAllocationMode>${resolvedMode}</IpAddressAllocationMode>
+                ${adapterLine}
+            </NetworkConnection>`;
+        // Must land after the last <NetworkConnection> but before any trailing <Link> elements —
+        // NetworkConnectionSection's schema is Info, PrimaryNetworkConnectionIndex, NetworkConnection*,
+        // Link* in that order, and vCD's own GET response includes those Link elements before the
+        // closing tag. Inserting right before </NetworkConnectionSection> (after the Links) is invalid.
+        if (allNcs.length > 0) {
+          const lastNc = allNcs[allNcs.length - 1]!;
+          xml = xml.replace(lastNc, `${lastNc}\n        ${newNicXml}`);
+        } else {
+          xml = xml.replace(
+            /(<PrimaryNetworkConnectionIndex>\d+<\/PrimaryNetworkConnectionIndex>)/,
+            `$1\n        ${newNicXml}`
+          );
+        }
+
+        // First NIC ever added, or isPrimary explicitly requested: set it as primary.
+        const makesPrimary = existingIndices.length === 0 || !!update.isPrimary;
+        if (makesPrimary) {
+          xml = xml.replace(
+            /<PrimaryNetworkConnectionIndex>\d+<\/PrimaryNetworkConnectionIndex>/,
+            `<PrimaryNetworkConnectionIndex>${newIndex}</PrimaryNetworkConnectionIndex>`
+          );
+        }
+
+        const putResp = await this.makeRequest<string>({
+          method: 'PUT',
+          url: `/vApp/vm-${vmUuid(vmId)}/networkConnectionSection`,
+          data: xml,
+          headers: { 'Content-Type': 'application/vnd.vmware.vcloud.networkConnectionSection+xml' }
+        }, zoneId);
+
+        return this.formatMcpResponse(
+          {
+            ...parseTaskResponse(putResp.data as unknown as string),
+            vmId,
+            nicIndex: newIndex,
+            added: { networkName: update.networkName, ipMode: resolvedMode, ipAddress: update.ipAddress, isPrimary: makesPrimary, adapterType: update.adapterType },
+          },
+          zone
+        );
       }
 
+      const nicIndex = update.nicIndex ?? 0;
+      const targetNc = allNcs.find(block => {
+        const idxMatch = block.match(/<NetworkConnectionIndex>(\d+)<\/NetworkConnectionIndex>/);
+        return idxMatch?.[1] !== undefined && parseInt(idxMatch[1], 10) === nicIndex;
+      }) ?? null;
+
       if (!targetNc) {
-        const found = allNcs
-          .map(n => n.match(/<NetworkConnectionIndex>(\d+)<\/NetworkConnectionIndex>/)?.[1])
-          .filter(Boolean)
-          .join(', ');
-        throw new Error(`NIC index ${nicIndex} not found. Available NIC indices: [${found}]`);
+        throw new Error(`NIC index ${nicIndex} not found. Available NIC indices: [${existingIndices.join(', ')}]. Pass addNic: true to add a new NIC instead of updating an existing one.`);
       }
 
       let updatedNc = targetNc;
@@ -3072,6 +3563,17 @@ export class ZettagridClient {
         }
       }
 
+      // Confirmed live: vCD rejects this outright — "Cannot change network adapter type of
+      // existing virtual machine" — regardless of power state. Only works on a brand-new NIC
+      // (see the addNic branch above). Left in place rather than pre-emptively blocked here:
+      // vCD's own error message is already clear, and some environments/versions may differ.
+      if (update.adapterType) {
+        updatedNc = updatedNc.includes('<NetworkAdapterType>')
+          ? updatedNc.replace(/<NetworkAdapterType>[^<]*<\/NetworkAdapterType>/, `<NetworkAdapterType>${update.adapterType}</NetworkAdapterType>`)
+          // Must be the last child — insert right before the closing tag.
+          : updatedNc.replace('</NetworkConnection>', `<NetworkAdapterType>${update.adapterType}</NetworkAdapterType>\n            </NetworkConnection>`);
+      }
+
       xml = xml.replace(targetNc, updatedNc);
 
       if (update.isPrimary) {
@@ -3098,6 +3600,7 @@ export class ZettagridClient {
             ipMode: update.ipMode,
             ipAddress: update.ipAddress,
             isPrimary: update.isPrimary,
+            adapterType: update.adapterType,
           },
         },
         zone

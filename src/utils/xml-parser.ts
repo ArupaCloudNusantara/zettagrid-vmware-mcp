@@ -326,9 +326,31 @@ export function parseVmDetails(xmlString: string): Record<string, any> {
       const mac = connBody.match(/<MACAddress>(.*?)<\/MACAddress>/)?.[1] ?? '';
       const connected = (connBody.match(/<IsConnected>(.*?)<\/IsConnected>/)?.[1] ?? '') === 'true';
       const allocMode = connBody.match(/<IpAddressAllocationMode>(.*?)<\/IpAddressAllocationMode>/)?.[1] ?? '';
-      connections.push({ network: networkName, ipAddress: ipAddr, macAddress: mac, isConnected: connected, allocationMode: allocMode });
+      const adapterType = connBody.match(/<NetworkAdapterType>(.*?)<\/NetworkAdapterType>/)?.[1] ?? undefined;
+      connections.push({ network: networkName, ipAddress: ipAddr, macAddress: mac, isConnected: connected, allocationMode: allocMode, adapterType });
     }
     if (connections.length > 0) details.networkConnections = connections;
+  }
+
+  // Storage profile — VM-level <StorageProfile href="..." name="..."/> (distinct from any
+  // per-disk rasd:HostResource storageProfileHref attribute, which can differ per disk).
+  const storageProfileMatch = xmlString.match(/<StorageProfile\b[^>]*\bhref="([^"]*)"[^>]*\bname="([^"]*)"/)
+    ?? xmlString.match(/<StorageProfile\b[^>]*\bname="([^"]*)"[^>]*\bhref="([^"]*)"/);
+  if (storageProfileMatch) {
+    // Attribute order varies (href-then-name vs name-then-href) — detect by matching which group looks like a URL.
+    const [, a, b] = storageProfileMatch;
+    if (a?.startsWith('http')) { details.storageProfileHref = a; details.storageProfileName = b; }
+    else { details.storageProfileName = a; details.storageProfileHref = b; }
+  }
+
+  // CPU/memory hot-add flags — <VmCapabilities>
+  const vmCapsMatch = xmlString.match(/<VmCapabilities\b[^>]*>([\s\S]*?)<\/VmCapabilities>/);
+  if (vmCapsMatch) {
+    const capsBody = vmCapsMatch[1] ?? '';
+    const memHotAdd = capsBody.match(/<MemoryHotAddEnabled>(.*?)<\/MemoryHotAddEnabled>/)?.[1];
+    const cpuHotAdd = capsBody.match(/<CpuHotAddEnabled>(.*?)<\/CpuHotAddEnabled>/)?.[1];
+    if (memHotAdd !== undefined) details.memoryHotAddEnabled = memHotAdd === 'true';
+    if (cpuHotAdd !== undefined) details.cpuHotAddEnabled = cpuHotAdd === 'true';
   }
 
   // Disks — ResourceType 17 items in VirtualHardwareSection
@@ -365,6 +387,24 @@ export function parseVmDetails(xmlString: string): Record<string, any> {
   if (osType && !details.osType) details.osType = osType;
 
   return details;
+}
+
+/**
+ * Parse a GET /vApp/vm-{id}/productSections response into key/value OVF properties
+ * (hostname, instance-id, public-keys, user-data, etc.) — the only way to verify what a
+ * VM was actually configured with, e.g. whether SSH key injection landed.
+ */
+export function parseProductSectionProperties(xmlString: string): Array<{ key: string; value: string }> {
+  const props: Array<{ key: string; value: string }> = [];
+  const propPattern = /<ovf:Property\b([^>]*)\/?>/g;
+  let m: RegExpExecArray | null;
+  while ((m = propPattern.exec(xmlString)) !== null) {
+    const attrs = m[1] ?? '';
+    const key = attrs.match(/ovf:key="([^"]*)"/)?.[1];
+    const value = attrs.match(/ovf:value="([^"]*)"/)?.[1] ?? '';
+    if (key) props.push({ key, value });
+  }
+  return props;
 }
 
 /**

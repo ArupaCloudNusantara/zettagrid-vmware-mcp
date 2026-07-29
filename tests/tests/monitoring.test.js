@@ -331,6 +331,45 @@ describe('UC-MON-007 — Get VDC Detail', () => {
   });
 });
 
+// ─── Regression: H5 — a friendly VDC/vApp name (e.g. "DC_1138718") passed directly
+// where VCD's /query filters and REST paths expect a UUID used to come back as a
+// generic HTTP 500/400 that reads like a permissions failure. These identifiers
+// should now resolve internally via list_vdcs/list_vapps lookups. ─────────────────
+describe('H5 Regression — friendly-name to UUID resolution', () => {
+  const UC = 'H5';
+
+  test('show_vdc_resources accepts a friendly VDC name directly', async () => {
+    log.separator(UC + ': show_vdc_resources with friendly VDC name');
+    const result = await client.call('show_vdc_resources', { vdcId: cfg.fixtures.vdcName });
+    log.result(UC, 'show_vdc_resources accepts friendly name', result?.success !== false, `error="${result?.error?.message || ''}"`);
+    expect(result?.success).not.toBe(false);
+  });
+
+  test('get_vdc accepts a friendly VDC name directly', async () => {
+    log.separator(UC + ': get_vdc with friendly VDC name');
+    const result = await client.call('get_vdc', { vdcId: cfg.fixtures.vdcName });
+    log.result(UC, 'get_vdc accepts friendly name', result?.success !== false, `error="${result?.error?.message || ''}"`);
+    expect(result?.success).not.toBe(false);
+  });
+
+  test('list_vapps accepts a friendly VDC name directly for vdcId filtering', async () => {
+    log.separator(UC + ': list_vapps with friendly VDC name');
+    const result = await client.call('list_vapps', { vdcId: cfg.fixtures.vdcName });
+    log.result(UC, 'list_vapps accepts friendly name', result?.success !== false, `error="${result?.error?.message || ''}"`);
+    expect(result?.success).not.toBe(false);
+  });
+
+  test('list_vms accepts a friendly vApp name directly for vappId filtering', async () => {
+    log.separator(UC + ': list_vms with friendly vApp name');
+    const vapps = toArray(await client.call('list_vapps', {}));
+    const vapp  = vapps.find(v => v.name);
+    if (!vapp?.name) { log.warn(`${UC}: no named vApp found — skipping`); return; }
+    const result = await client.call('list_vms', { vappId: vapp.name });
+    log.result(UC, 'list_vms accepts friendly vApp name', result?.success !== false, `vappName=${vapp.name} error="${result?.error?.message || ''}"`);
+    expect(result?.success).not.toBe(false);
+  });
+});
+
 // ─── UC-MON-008: External and Provider Networks ───────────────────────────
 describe('UC-MON-008 — List External Networks and Provider Network Info', () => {
   const UC = 'UC-MON-008';

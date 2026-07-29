@@ -395,6 +395,8 @@ export interface VAppNetworkConnection {
   ipAddress?: string;
   isPrimary?: boolean;
   index?: number;
+  /** Virtual NIC hardware type. Omit to let vCD default (typically VMXNET3). */
+  adapterType?: 'VMXNET3' | 'E1000' | 'E1000E';
 }
 
 /** OVF ProductSection property — used for cloud-init on Ubuntu images */

@@ -298,7 +298,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'power_on_vm',
-          description: 'Power on a virtual machine',
+          description: 'Power on a virtual machine. Returns a bare taskId by default (poll get_task yourself) — pass waitForTask:true to wait for completion instead.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -306,6 +306,8 @@ export class ZettagridMcpServer {
                 type: 'string',
                 description: 'Virtual machine ID'
               },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
@@ -317,7 +319,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'power_off_vm',
-          description: 'Power off a virtual machine',
+          description: 'Power off a virtual machine. Returns a bare taskId by default (poll get_task yourself) — pass waitForTask:true to wait for completion instead.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -325,6 +327,8 @@ export class ZettagridMcpServer {
                 type: 'string',
                 description: 'Virtual machine ID'
               },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
@@ -637,6 +641,8 @@ export class ZettagridMcpServer {
               cpuCount: { type: 'number', description: 'Number of vCPUs (e.g. 2, 4, 8)' },
               coresPerSocket: { type: 'number', description: 'Cores per socket. If omitted, the current value is read from the VM and preserved (important for hot-add on powered-on VMs). For new/powered-off VMs with no prior value, defaults to min(cpuCount, 16) to minimise socket count. Only set explicitly for specific NUMA or licensing requirements.' },
               cpuHotAdd: { type: 'boolean', description: 'Enable CPU hot-add (true) or disable it (false). Allows adding vCPUs to a running VM in future. Must be set while VM is powered off; do not pass this when hot-adding vCPUs to a running VM.' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'cpuCount']
@@ -651,6 +657,8 @@ export class ZettagridMcpServer {
               vmId: { type: 'string', description: 'VM UUID' },
               memoryMB: { type: 'number', description: 'Memory in MB (e.g. 1024=1GB, 2048=2GB, 4096=4GB, 8192=8GB)' },
               memoryHotAdd: { type: 'boolean', description: 'Enable memory hot-add (true) or disable it (false). Allows increasing RAM on a running VM in future. Must be set while VM is powered off; do not pass this when hot-adding memory to a running VM.' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'memoryMB']
@@ -664,6 +672,24 @@ export class ZettagridMcpServer {
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
               diskSizeMB: { type: 'number', description: 'New disk size in MB — use diskSizeMB NOT diskSizeGB (20 GB = 20480, 50 GB = 51200)' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId', 'diskSizeMB']
+          }
+        },
+        {
+          name: 'add_vm_disk',
+          description: 'Add a brand-new disk to a VM — distinct from update_vm_disk, which only resizes the existing boot disk. Common for multi-disk shapes (e.g. a separate data/DB disk from the OS disk). Not supported hot in this environment: the VM is powered off automatically if needed and restored to its original power state afterward. Parameter is "diskSizeMB" (NOT diskSizeGB — multiply GB × 1024).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID' },
+              diskSizeMB: { type: 'number', description: 'New disk size in MB — use diskSizeMB NOT diskSizeGB (20 GB = 20480, 50 GB = 51200)' },
+              storageProfileHref: { type: 'string', description: 'Storage policy href for the new disk (optional — defaults to the same profile as the template disk used as its structural basis)' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId', 'diskSizeMB']
@@ -684,14 +710,31 @@ export class ZettagridMcpServer {
         },
         {
           name: 'delete_vapp',
-          description: 'Delete a vApp and all VMs inside it. Automatically undeployes the vApp first if still deployed (handles suspended or mixed-state vApps). WARNING: irreversible — all VM disks and data are permanently deleted.',
+          description: 'Delete a vApp and all VMs inside it. Automatically undeployes the vApp first if still deployed (handles suspended or mixed-state vApps). If the vApp contains more than one VM, this is rejected unless force:true is passed — use delete_vm to remove a single VM instead. WARNING: irreversible — all VM disks and data are permanently deleted.',
           inputSchema: {
             type: 'object',
             properties: {
               vappId: { type: 'string', description: 'vApp UUID (from list_vapps or create_vapp)' },
+              force: { type: 'boolean', description: 'Required to be true when the vApp contains more than one VM — confirms you intend to destroy all of them' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vappId']
+          }
+        },
+        {
+          name: 'delete_vm',
+          description: 'Remove a single VM from its vApp, leaving the vApp and its other VMs intact. Undeploys the VM first if still deployed. Discovers the parent vApp automatically — no vappId needed. WARNING: irreversible — the VM\'s disks and data are permanently deleted.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID (from list_vms or get_vm)' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
           }
         },
         {
@@ -701,6 +744,8 @@ export class ZettagridMcpServer {
             type: 'object',
             properties: {
               vappId: { type: 'string', description: 'vApp UUID (from list_vapps)' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vappId']
@@ -777,6 +822,8 @@ export class ZettagridMcpServer {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'Virtual machine ID' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId']
@@ -808,11 +855,13 @@ export class ZettagridMcpServer {
         },
         {
           name: 'power_on_vapp',
-          description: 'Power on a vApp and all its VMs',
+          description: 'Power on a vApp and all its VMs. Returns a bare taskId by default (poll get_task yourself) — pass waitForTask:true to wait for completion instead.',
           inputSchema: {
             type: 'object',
             properties: {
               vappId: { type: 'string', description: 'vApp ID' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vappId']
@@ -820,11 +869,13 @@ export class ZettagridMcpServer {
         },
         {
           name: 'power_off_vapp',
-          description: 'Power off a vApp. WARNING: hard power-off.',
+          description: 'Power off a vApp. WARNING: hard power-off. Returns a bare taskId by default (poll get_task yourself) — pass waitForTask:true to wait for completion instead.',
           inputSchema: {
             type: 'object',
             properties: {
               vappId: { type: 'string', description: 'vApp ID' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vappId']
@@ -839,6 +890,8 @@ export class ZettagridMcpServer {
               vdcId: { type: 'string', description: 'Target VDC ID (UUID from list_vdcs)' },
               templateId: { type: 'string', description: 'Full catalog template href (e.g. "https://mycloud-jkt.zettagrid.id/api/vAppTemplate/vappTemplate-{uuid}") from list_catalog_items' },
               vappName: { type: 'string', description: 'Name for the new vApp' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] },
               instantiationParams: {
                 type: 'object',
@@ -865,10 +918,10 @@ export class ZettagridMcpServer {
                       properties: {
                         vmName: { type: 'string', description: 'VM display name — use "vmName" NOT "name" (common mistake). Overrides template default.' },
                         description: { type: 'string', description: 'VM description' },
-                        cpuCount: { type: 'number', description: 'vCPU count — use "cpuCount" NOT "cpus". Applied post-instantiation via update_vm_cpu.' },
+                        cpuCount: { type: 'number', description: 'vCPU count — use "cpuCount" NOT "cpus". NOT applied by this call; recorded only. You must call update_vm_cpu yourself after creation to actually set it.' },
                         coresPerSocket: { type: 'number', description: 'CPU cores per socket' },
-                        memoryMB: { type: 'number', description: 'RAM in MB — use "memoryMB" NOT "memorySizeMB". Applied post-instantiation via update_vm_memory.' },
-                        diskSizeMB: { type: 'number', description: 'Boot disk size in MB — applied post-instantiation via update_vm_disk.' },
+                        memoryMB: { type: 'number', description: 'RAM in MB — use "memoryMB" NOT "memorySizeMB". NOT applied by this call; recorded only. You must call update_vm_memory yourself after creation to actually set it.' },
+                        diskSizeMB: { type: 'number', description: 'Boot disk size in MB. NOT applied by this call; recorded only. You must call update_vm_disk yourself after creation to actually set it.' },
                         storageProfileHref: { type: 'string', description: 'Storage policy href' },
                         storageProfileName: { type: 'string', description: 'Storage policy name' },
                         networkConnections: {
@@ -881,7 +934,8 @@ export class ZettagridMcpServer {
                               ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode. Omit to auto-select: defaults to POOL when pool IPs are available, otherwise clarification is requested.' },
                               ipAddress: { type: 'string', description: 'Static IP (required when ipMode=MANUAL)' },
                               isPrimary: { type: 'boolean', description: 'Set as primary NIC (default: first NIC)' },
-                              index: { type: 'number', description: 'NIC index (default: array position)' }
+                              index: { type: 'number', description: 'NIC index (default: array position)' },
+                              adapterType: { type: 'string', enum: ['VMXNET3', 'E1000', 'E1000E'], description: 'Virtual NIC hardware type — must be set before first power-on. Omit to let vCD default (typically VMXNET3).' }
                             },
                             required: ['networkName']
                           }
@@ -992,6 +1046,8 @@ export class ZettagridMcpServer {
             properties: {
               vmId: { type: 'string', description: 'Virtual machine ID' },
               snapshotName: { type: 'string', description: 'Snapshot name (optional)' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId']
@@ -1047,6 +1103,8 @@ export class ZettagridMcpServer {
               templateId: { type: 'string', description: 'Catalog template href (from list_catalog_items)' },
               vmName: { type: 'string', description: 'Name for the new VM' },
               vdcId: { type: 'string', description: 'VDC UUID (optional but recommended — enables static IP pool availability checking)' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] },
               networkConnections: {
                 type: 'array',
@@ -1058,7 +1116,8 @@ export class ZettagridMcpServer {
                     ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode (omit to auto-select)' },
                     ipAddress: { type: 'string', description: 'Static IP (required when ipMode=MANUAL)' },
                     isPrimary: { type: 'boolean', description: 'Set as primary NIC' },
-                    index: { type: 'number', description: 'NIC index (default: array position)' }
+                    index: { type: 'number', description: 'NIC index (default: array position)' },
+                    adapterType: { type: 'string', enum: ['VMXNET3', 'E1000', 'E1000E'], description: 'Virtual NIC hardware type — must be set before first power-on. Omit to let vCD default (typically VMXNET3).' }
                   },
                   required: ['networkName']
                 }
@@ -1088,23 +1147,29 @@ export class ZettagridMcpServer {
                   customizationScript: { type: 'string' },
                   changeSid: { type: 'boolean' }
                 }
-              }
+              },
+              storageProfileHref: { type: 'string', description: 'Storage policy href for the new VM' },
+              storageProfileName: { type: 'string', description: 'Storage policy name (display only — storageProfileHref is what vCD actually uses)' }
             },
             required: ['vappId', 'templateId', 'vmName']
           }
         },
         {
           name: 'update_vm_network',
-          description: 'Update a VM NIC\'s network/IP properties. Takes flat parameters (nicIndex, networkName, ipMode, ipAddress, isPrimary) — NOT a networkConnections array. The networkName must match the name of a network the vApp already has configured (as shown in get_vm networkConnections[].network). VM can be running or powered off.',
+          description: 'Update a VM NIC\'s network/IP properties, or add a brand-new NIC. Takes flat parameters (nicIndex, networkName, ipMode, ipAddress, isPrimary, adapterType) — NOT a networkConnections array. The networkName must match the name of a network the vApp already has configured (as shown in get_vm networkConnections[].network). VM can be running or powered off. Pass addNic:true to append a new NIC instead of editing an existing one (nicIndex is then optional — omit it to auto-assign the next available index; networkName is required).',
           inputSchema: {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
-              nicIndex: { type: 'number', description: 'NIC index to update (default: 0 — first NIC)' },
-              networkName: { type: 'string', description: 'New org VDC network name to connect this NIC to' },
+              nicIndex: { type: 'number', description: 'NIC index to update (default: 0 — first NIC). With addNic:true, the index for the new NIC (default: next available).' },
+              networkName: { type: 'string', description: 'Org VDC network name to connect this NIC to' },
               ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode' },
               ipAddress: { type: 'string', description: 'Static IP address (required when ipMode=MANUAL)' },
               isPrimary: { type: 'boolean', description: 'Set this NIC as the primary NIC' },
+              addNic: { type: 'boolean', description: 'Append a new NIC instead of editing an existing one at nicIndex' },
+              adapterType: { type: 'string', enum: ['VMXNET3', 'E1000', 'E1000E'], description: 'Virtual NIC hardware type. Only settable with addNic:true (on the new NIC) — vCD rejects changing an EXISTING NIC\'s adapter type outright ("Cannot change network adapter type of existing virtual machine"), regardless of power state.' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId']
@@ -1398,6 +1463,15 @@ export class ZettagridMcpServer {
             );
             break;
 
+          case 'add_vm_disk':
+            result = await this.client.addVMDisk(
+              req('vmId'),
+              reqNum('diskSizeMB'),
+              args?.storageProfileHref as string | undefined,
+              args?.zoneId as string | undefined
+            );
+            break;
+
           case 'update_vm_memory':
             result = await this.client.updateVMMemory(
               req('vmId'),
@@ -1418,6 +1492,14 @@ export class ZettagridMcpServer {
           case 'delete_vapp':
             result = await this.client.deleteVApp(
               req('vappId'),
+              args?.zoneId as string | undefined,
+              args?.force as boolean | undefined
+            );
+            break;
+
+          case 'delete_vm':
+            result = await this.client.deleteVM(
+              req('vmId'),
               args?.zoneId as string | undefined
             );
             break;
@@ -1574,6 +1656,8 @@ export class ZettagridMcpServer {
                 networkConnections: args?.networkConnections as import('../types.js').VAppNetworkConnection[] | undefined,
                 ovfProperties: args?.ovfProperties as import('../types.js').VAppOvfProperty[] | undefined,
                 guestCustomization: args?.guestCustomization as import('../types.js').VAppGuestCustomization | undefined,
+                storageProfileHref: args?.storageProfileHref as string | undefined,
+                storageProfileName: args?.storageProfileName as string | undefined,
               },
               args?.vdcId as string | undefined,
               args?.zoneId as string | undefined
@@ -1589,6 +1673,8 @@ export class ZettagridMcpServer {
                 ipMode: args?.ipMode as 'DHCP' | 'POOL' | 'MANUAL' | 'NONE' | undefined,
                 ipAddress: args?.ipAddress as string | undefined,
                 isPrimary: args?.isPrimary as boolean | undefined,
+                addNic: args?.addNic as boolean | undefined,
+                adapterType: args?.adapterType as 'VMXNET3' | 'E1000' | 'E1000E' | undefined,
               },
               args?.zoneId as string | undefined
             );
@@ -1622,6 +1708,29 @@ export class ZettagridMcpServer {
               ErrorCode.MethodNotFound,
               `Unknown tool: ${name}`
             );
+        }
+
+        // Opt-in wait-for-completion (L3): every mutating tool returns a bare task by default
+        // (unchanged) — pass waitForTask:true (+ optional timeoutMs) to poll get_task
+        // internally here instead of requiring a separate round-trip. Generic across every
+        // tool that returns a data.taskId, not just the ones whose schema documents it.
+        const taskId = (result as any)?.data?.taskId;
+        if (args?.waitForTask && taskId) {
+          const timeoutMs = Math.min(Math.max(Number(args?.timeoutMs) || 120_000, 1_000), 300_000);
+          const pollZoneId = args?.zoneId as string | undefined;
+          const deadline = Date.now() + timeoutMs;
+          let lastTaskResult: McpToolResponse = result;
+          while (Date.now() < deadline) {
+            await new Promise(r => setTimeout(r, 3000));
+            if (Date.now() >= deadline) break;
+            lastTaskResult = await this.client.getTask(taskId, pollZoneId);
+            const status = (lastTaskResult as any)?.data?.taskStatus;
+            if (status === 'success' || status === 'error' || status === 'aborted') break;
+          }
+          result = {
+            ...result,
+            data: { ...(result as any).data, ...((lastTaskResult as any)?.data ?? {}) },
+          } as McpToolResponse;
         }
 
         // Use formatted text if available, otherwise return JSON
