@@ -486,6 +486,133 @@ describe('H3 Regression — add_vm_disk', () => {
   });
 });
 
+// ─── Regression: M2/M3/M4/L3 — add_vm_to_vapp lacked storage-profile parity with create_vapp
+// (M2); no tool exposed NIC adapter type (M3); get_vm couldn't verify storage profile, adapter
+// type, hot-add flags, or OVF/guest properties like injected SSH keys (M4); no tool offered a
+// wait-for-completion option, forcing a separate get_task poll after every mutating call (L3).
+// One add_vm_to_vapp call with waitForTask:true, adapterType, storageProfileHref, and
+// ovfProperties exercises all four together. ──────────────────────────────────────────────
+describe('M2/M3/M4/L3 Regression — storage profile, adapter type, get_vm fields, waitForTask', () => {
+  const UC = 'M2-M4-L3';
+
+  test('add_vm_to_vapp with waitForTask resolves the task without a separate poll', async () => {
+    log.separator(UC + ': add_vm_to_vapp with waitForTask + adapterType + storageProfileHref + ovfProperties');
+    const vappId = created.vappId;
+    const vdcId  = created.vdcId;
+    if (!vappId || !vdcId) { log.warn(`${UC}: no vappId/vdcId from UC-VA-001 — skipping`); return; }
+
+    // Discover a real storage profile href from an existing VM (M4's new get_vm field) to
+    // pass into add_vm_to_vapp (M2 — previously the field wasn't even in the tool's schema).
+    const existingVms = toArray(await client.call('list_vms', { vappId }));
+    const refVm = existingVms[0];
+    if (!refVm?.id) { log.warn(`${UC}: no existing VM to read a storage profile from — skipping`); return; }
+    const refVmData = get(await client.call('get_vm', { vmId: refVm.id }), 'data') || {};
+    const storageProfileHref = refVmData.storageProfileHref;
+    if (!storageProfileHref) { log.warn(`${UC}: get_vm returned no storageProfileHref — skipping`); return; }
+    log.info(`Using storage profile: ${refVmData.storageProfileName} (${storageProfileHref})`);
+
+    const networkName = created.vmWithNetworkTarget;
+    if (!networkName) { log.warn(`${UC}: no known-good network name — skipping`); return; }
+
+    const cats = toArray(await client.call('list_catalogs', {}));
+    let match;
+    for (const cat of cats) {
+      const items = toArray(await client.call('list_catalog_items', { catalogId: cat.id || cat.catalogId }));
+      match = items.find(i => (i.entityType || '').toLowerCase().includes('vapptemplate')) || match;
+      if (match) break;
+    }
+    const templateId = match?.entityHref || match?.href;
+    expect(templateId).toBeTruthy();
+
+    const publicKeyValue = 'ssh-ed25519 AAAAExampleTestKeyOnly test@m4-regression';
+    const vmName = `test-vm-m2m3m4-${Date.now()}`;
+    const result = await client.call('add_vm_to_vapp', {
+      vappId,
+      templateId,
+      vmName,
+      vdcId,
+      networkConnections: [{ networkName, ipMode: 'DHCP', adapterType: 'E1000' }],
+      storageProfileHref,
+      ovfProperties: [{ key: 'public-keys', value: publicKeyValue }],
+      waitForTask: true,
+      timeoutMs: 180_000,
+    }, cfg.timeouts.taskPoll);
+
+    const succeeded = result?.success !== false;
+    log.result(UC, 'add_vm_to_vapp accepted', succeeded, `error="${result?.error?.message || ''}"`);
+    expect(succeeded).toBe(true);
+
+    // L3: the task should already be resolved — no separate get_task poll needed.
+    const taskStatus = get(result, 'data', 'taskStatus');
+    log.result(UC, 'waitForTask resolved the task synchronously (L3)', taskStatus === 'success', `taskStatus=${taskStatus}`);
+    expect(taskStatus).toBe('success');
+
+    created.m4TestVmName = vmName;
+    created.m4TestStorageProfileHref = storageProfileHref;
+    created.m4TestPublicKeyValue = publicKeyValue;
+  });
+
+  test('get_vm exposes storage profile, adapter type, hot-add flags, and OVF properties (M4)', async () => {
+    log.separator(UC + ': get_vm field verification');
+    const vappId = created.vappId;
+    if (!vappId || !created.m4TestVmName) { log.warn(`${UC}: no VM from the previous test — skipping`); return; }
+
+    const vms   = toArray(await client.call('list_vms', { vappId }));
+    const added = vms.find(v => v.name === created.m4TestVmName);
+    if (!added?.id) { log.warn(`${UC}: could not find VM "${created.m4TestVmName}" — skipping`); return; }
+
+    const vm = get(await client.call('get_vm', { vmId: added.id }), 'data') || {};
+
+    log.result(UC, 'storageProfileHref matches request (M2 + M4)', vm.storageProfileHref === created.m4TestStorageProfileHref, `expected=${created.m4TestStorageProfileHref} actual=${vm.storageProfileHref}`);
+    expect(vm.storageProfileHref).toBe(created.m4TestStorageProfileHref);
+
+    const nic = toArray(vm.networkConnections)[0];
+    log.result(UC, 'NIC adapterType is E1000 as requested (M3)', nic?.adapterType === 'E1000', `nic=${JSON.stringify(nic)}`);
+    expect(nic?.adapterType).toBe('E1000');
+
+    log.result(UC, 'cpuHotAddEnabled present (M4)', typeof vm.cpuHotAddEnabled === 'boolean', `value=${vm.cpuHotAddEnabled}`);
+    expect(typeof vm.cpuHotAddEnabled).toBe('boolean');
+    log.result(UC, 'memoryHotAddEnabled present (M4)', typeof vm.memoryHotAddEnabled === 'boolean', `value=${vm.memoryHotAddEnabled}`);
+    expect(typeof vm.memoryHotAddEnabled).toBe('boolean');
+
+    const ovfProps = toArray(vm.ovfProperties);
+    const publicKeyProp = ovfProps.find(p => p.key === 'public-keys');
+    log.result(UC, 'ovfProperties includes the injected public-keys value (M4)', publicKeyProp?.value === created.m4TestPublicKeyValue, `publicKeyProp=${JSON.stringify(publicKeyProp)}`);
+    expect(publicKeyProp?.value).toBe(created.m4TestPublicKeyValue);
+  });
+
+  test("update_vm_network with adapterType on an EXISTING NIC is rejected by vCD (M3 platform constraint, not a code bug)", async () => {
+    log.separator(UC + ': update_vm_network adapterType on existing NIC');
+    const vappId = created.vappId;
+    if (!vappId || !created.m4TestVmName) { log.warn(`${UC}: no VM from the earlier test — skipping`); return; }
+
+    const vms   = toArray(await client.call('list_vms', { vappId }));
+    const target = vms.find(v => v.name === created.m4TestVmName);
+    if (!target?.id) { log.warn(`${UC}: could not find VM "${created.m4TestVmName}" — skipping`); return; }
+
+    // Confirmed live: vCD flatly rejects changing an existing NIC's adapter type ("Cannot
+    // change network adapter type of existing virtual machine"), regardless of power state.
+    // adapterType only works when adding a brand-new NIC (see the earlier add_vm_to_vapp test) —
+    // this documents the platform constraint rather than asserting a change that can't succeed.
+    const result = await client.call('update_vm_network', {
+      vmId: target.id,
+      nicIndex: 0,
+      adapterType: 'VMXNET3',
+    });
+
+    const rejected = result?.success === false && /adapter type/i.test(result?.error?.message || '');
+    log.result(UC, 'vCD rejects adapterType change on an existing NIC', rejected, `error="${result?.error?.message || ''}"`);
+    expect(rejected).toBe(true);
+
+    // Confirm the rejected call left the NIC's adapter type untouched (still E1000 from the
+    // add_vm_to_vapp call) rather than partially applying.
+    const vm  = get(await client.call('get_vm', { vmId: target.id }), 'data') || {};
+    const nic = toArray(vm.networkConnections)[0];
+    log.result(UC, 'NIC adapterType unchanged after rejection', nic?.adapterType === 'E1000', `nic=${JSON.stringify(nic)}`);
+    expect(nic?.adapterType).toBe('E1000');
+  });
+});
+
 // ─── UC-VA-003: Power On vApp ─────────────────────────────────────────────
 describe('UC-VA-003 — Power On a vApp', () => {
   const UC = 'UC-VA-003';

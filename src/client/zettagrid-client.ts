@@ -38,6 +38,7 @@ import {
   parseEntityAttributes,
   normalizeIdFromHrefOrId,
   parseVmDetails,
+  parseProductSectionProperties,
   parseVAppDetails,
   parseTaskResponse
 } from '../utils/xml-parser.js';
@@ -875,18 +876,27 @@ export class ZettagridClient {
    */
   async getVM(vmId: string, zoneId?: string): Promise<McpToolResponse<Vm>> {
     try {
-      // Fetch entity XML and disk sub-resource in parallel — the sub-resource is authoritative
-      // for current disk sizes after hot-resize (the full entity XML may lag behind).
+      // Fetch entity XML, disk sub-resource, and OVF product-section properties in parallel.
+      // The disk sub-resource is authoritative for current disk sizes after hot-resize (the
+      // full entity XML may lag behind); productSections isn't in the entity XML at all — it's
+      // the only way to verify what a VM was actually configured with (e.g. SSH key injection).
       const uuid = vmUuid(vmId);
       const zone = zoneId || this.zoneManager.getConfig().defaultZone;
-      const [entityResp, diskResp] = await Promise.all([
+      const [entityResp, diskResp, productSectionsResp] = await Promise.all([
         this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}` }, zoneId),
         this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}/virtualHardwareSection/disks` }, zoneId)
+          .catch(() => null),
+        this.makeRequest<string>({ method: 'GET', url: `/vApp/vm-${uuid}/productSections` }, zoneId)
           .catch(() => null),
       ]);
 
       // parseVmDetails extracts root attributes + CPU/RAM/IP from child XML elements
       const parsed = parseVmDetails(entityResp.data);
+
+      if (productSectionsResp) {
+        const ovfProperties = parseProductSectionProperties(productSectionsResp.data as unknown as string);
+        if (ovfProperties.length > 0) parsed.ovfProperties = ovfProperties;
+      }
 
       // Override disk info with sub-resource data (avoids stale entity XML after hot-resize).
       // Uses the same <Item>...</Item> pattern as updateVMDisk — no namespace prefix in this endpoint.
@@ -1244,11 +1254,16 @@ export class ZettagridClient {
         const idx = nc.index ?? i;
         const resolvedMode = nc.ipMode ?? 'POOL';
         const ipLine = resolvedMode === 'MANUAL' && nc.ipAddress ? `<IpAddress>${nc.ipAddress}</IpAddress>` : '';
+        // NetworkAdapterType must be the LAST child of NetworkConnection (after
+        // IpAddressAllocationMode/SecondaryIpAddressAllocationMode) — confirmed via live
+        // vCD response inspection, not documented anywhere obvious.
+        const adapterLine = nc.adapterType ? `<NetworkAdapterType>${nc.adapterType}</NetworkAdapterType>` : '';
         return `<NetworkConnection network="${nc.networkName}">
                 <NetworkConnectionIndex>${idx}</NetworkConnectionIndex>
                 ${ipLine}
                 <IsConnected>true</IsConnected>
                 <IpAddressAllocationMode>${resolvedMode}</IpAddressAllocationMode>
+                ${adapterLine}
             </NetworkConnection>`;
       }).join('\n            ');
       instSections.push(`<NetworkConnectionSection>
@@ -3421,6 +3436,7 @@ export class ZettagridClient {
       ipAddress?: string;
       isPrimary?: boolean;
       addNic?: boolean;
+      adapterType?: 'VMXNET3' | 'E1000' | 'E1000E';
     },
     zoneId?: string
   ): Promise<McpToolResponse<any>> {
@@ -3459,11 +3475,15 @@ export class ZettagridClient {
         }
         const resolvedMode = update.ipMode ?? 'POOL';
         const ipLine = resolvedMode === 'MANUAL' && update.ipAddress ? `<IpAddress>${update.ipAddress}</IpAddress>` : '';
+        // NetworkAdapterType must be the LAST child of NetworkConnection — confirmed via live
+        // vCD response inspection (same ordering buildSourcedItemXml's NIC template follows).
+        const adapterLine = update.adapterType ? `<NetworkAdapterType>${update.adapterType}</NetworkAdapterType>` : '';
         const newNicXml = `<NetworkConnection network="${update.networkName}">
                 <NetworkConnectionIndex>${newIndex}</NetworkConnectionIndex>
                 ${ipLine}
                 <IsConnected>true</IsConnected>
                 <IpAddressAllocationMode>${resolvedMode}</IpAddressAllocationMode>
+                ${adapterLine}
             </NetworkConnection>`;
         // Must land after the last <NetworkConnection> but before any trailing <Link> elements —
         // NetworkConnectionSection's schema is Info, PrimaryNetworkConnectionIndex, NetworkConnection*,
@@ -3500,7 +3520,7 @@ export class ZettagridClient {
             ...parseTaskResponse(putResp.data as unknown as string),
             vmId,
             nicIndex: newIndex,
-            added: { networkName: update.networkName, ipMode: resolvedMode, ipAddress: update.ipAddress, isPrimary: makesPrimary },
+            added: { networkName: update.networkName, ipMode: resolvedMode, ipAddress: update.ipAddress, isPrimary: makesPrimary, adapterType: update.adapterType },
           },
           zone
         );
@@ -3543,6 +3563,17 @@ export class ZettagridClient {
         }
       }
 
+      // Confirmed live: vCD rejects this outright — "Cannot change network adapter type of
+      // existing virtual machine" — regardless of power state. Only works on a brand-new NIC
+      // (see the addNic branch above). Left in place rather than pre-emptively blocked here:
+      // vCD's own error message is already clear, and some environments/versions may differ.
+      if (update.adapterType) {
+        updatedNc = updatedNc.includes('<NetworkAdapterType>')
+          ? updatedNc.replace(/<NetworkAdapterType>[^<]*<\/NetworkAdapterType>/, `<NetworkAdapterType>${update.adapterType}</NetworkAdapterType>`)
+          // Must be the last child — insert right before the closing tag.
+          : updatedNc.replace('</NetworkConnection>', `<NetworkAdapterType>${update.adapterType}</NetworkAdapterType>\n            </NetworkConnection>`);
+      }
+
       xml = xml.replace(targetNc, updatedNc);
 
       if (update.isPrimary) {
@@ -3569,6 +3600,7 @@ export class ZettagridClient {
             ipMode: update.ipMode,
             ipAddress: update.ipAddress,
             isPrimary: update.isPrimary,
+            adapterType: update.adapterType,
           },
         },
         zone
