@@ -670,6 +670,20 @@ export class ZettagridMcpServer {
           }
         },
         {
+          name: 'add_vm_disk',
+          description: 'Add a brand-new disk to a VM — distinct from update_vm_disk, which only resizes the existing boot disk. Common for multi-disk shapes (e.g. a separate data/DB disk from the OS disk). Not supported hot in this environment: the VM is powered off automatically if needed and restored to its original power state afterward. Parameter is "diskSizeMB" (NOT diskSizeGB — multiply GB × 1024).',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID' },
+              diskSizeMB: { type: 'number', description: 'New disk size in MB — use diskSizeMB NOT diskSizeGB (20 GB = 20480, 50 GB = 51200)' },
+              storageProfileHref: { type: 'string', description: 'Storage policy href for the new disk (optional — defaults to the same profile as the template disk used as its structural basis)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId', 'diskSizeMB']
+          }
+        },
+        {
           name: 'update_vm_computer_name',
           description: 'Update the computer name (hostname) of a VM in VCD. Must be called while the VM is powered off and BEFORE power-on. VCD injects this value as vCloud_computerName into the VM\'s OVF environment; open-vm-tools reads it on first boot and sets the OS hostname. For Ubuntu cloud-init VMs use this after instantiation and before power-on to ensure the correct hostname is set.',
           inputSchema: {
@@ -684,14 +698,27 @@ export class ZettagridMcpServer {
         },
         {
           name: 'delete_vapp',
-          description: 'Delete a vApp and all VMs inside it. Automatically undeployes the vApp first if still deployed (handles suspended or mixed-state vApps). WARNING: irreversible — all VM disks and data are permanently deleted.',
+          description: 'Delete a vApp and all VMs inside it. Automatically undeployes the vApp first if still deployed (handles suspended or mixed-state vApps). If the vApp contains more than one VM, this is rejected unless force:true is passed — use delete_vm to remove a single VM instead. WARNING: irreversible — all VM disks and data are permanently deleted.',
           inputSchema: {
             type: 'object',
             properties: {
               vappId: { type: 'string', description: 'vApp UUID (from list_vapps or create_vapp)' },
+              force: { type: 'boolean', description: 'Required to be true when the vApp contains more than one VM — confirms you intend to destroy all of them' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vappId']
+          }
+        },
+        {
+          name: 'delete_vm',
+          description: 'Remove a single VM from its vApp, leaving the vApp and its other VMs intact. Undeploys the VM first if still deployed. Discovers the parent vApp automatically — no vappId needed. WARNING: irreversible — the VM\'s disks and data are permanently deleted.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              vmId: { type: 'string', description: 'VM UUID (from list_vms or get_vm)' },
+              zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
+            },
+            required: ['vmId']
           }
         },
         {
@@ -1095,16 +1122,17 @@ export class ZettagridMcpServer {
         },
         {
           name: 'update_vm_network',
-          description: 'Update a VM NIC\'s network/IP properties. Takes flat parameters (nicIndex, networkName, ipMode, ipAddress, isPrimary) — NOT a networkConnections array. The networkName must match the name of a network the vApp already has configured (as shown in get_vm networkConnections[].network). VM can be running or powered off.',
+          description: 'Update a VM NIC\'s network/IP properties, or add a brand-new NIC. Takes flat parameters (nicIndex, networkName, ipMode, ipAddress, isPrimary) — NOT a networkConnections array. The networkName must match the name of a network the vApp already has configured (as shown in get_vm networkConnections[].network). VM can be running or powered off. Pass addNic:true to append a new NIC instead of editing an existing one (nicIndex is then optional — omit it to auto-assign the next available index; networkName is required).',
           inputSchema: {
             type: 'object',
             properties: {
               vmId: { type: 'string', description: 'VM UUID' },
-              nicIndex: { type: 'number', description: 'NIC index to update (default: 0 — first NIC)' },
-              networkName: { type: 'string', description: 'New org VDC network name to connect this NIC to' },
+              nicIndex: { type: 'number', description: 'NIC index to update (default: 0 — first NIC). With addNic:true, the index for the new NIC (default: next available).' },
+              networkName: { type: 'string', description: 'Org VDC network name to connect this NIC to' },
               ipMode: { type: 'string', enum: ['DHCP', 'POOL', 'MANUAL', 'NONE'], description: 'IP allocation mode' },
               ipAddress: { type: 'string', description: 'Static IP address (required when ipMode=MANUAL)' },
               isPrimary: { type: 'boolean', description: 'Set this NIC as the primary NIC' },
+              addNic: { type: 'boolean', description: 'Append a new NIC instead of editing an existing one at nicIndex' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['vmId']
@@ -1398,6 +1426,15 @@ export class ZettagridMcpServer {
             );
             break;
 
+          case 'add_vm_disk':
+            result = await this.client.addVMDisk(
+              req('vmId'),
+              reqNum('diskSizeMB'),
+              args?.storageProfileHref as string | undefined,
+              args?.zoneId as string | undefined
+            );
+            break;
+
           case 'update_vm_memory':
             result = await this.client.updateVMMemory(
               req('vmId'),
@@ -1418,6 +1455,14 @@ export class ZettagridMcpServer {
           case 'delete_vapp':
             result = await this.client.deleteVApp(
               req('vappId'),
+              args?.zoneId as string | undefined,
+              args?.force as boolean | undefined
+            );
+            break;
+
+          case 'delete_vm':
+            result = await this.client.deleteVM(
+              req('vmId'),
               args?.zoneId as string | undefined
             );
             break;
@@ -1589,6 +1634,7 @@ export class ZettagridMcpServer {
                 ipMode: args?.ipMode as 'DHCP' | 'POOL' | 'MANUAL' | 'NONE' | undefined,
                 ipAddress: args?.ipAddress as string | undefined,
                 isPrimary: args?.isPrimary as boolean | undefined,
+                addNic: args?.addNic as boolean | undefined,
               },
               args?.zoneId as string | undefined
             );
