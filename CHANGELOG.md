@@ -29,6 +29,35 @@ Field-reported defect fixes from a live multi-VM/multi-disk deployment scenario 
 
 ---
 
+## [1.2.0] — 2026-07-08
+
+133/133 integration tests passing against live VCD API.
+
+*(Backfilled 2026-07-29 — this entry was skipped at release time. Reconstructed from the `v1.2.0` git tag message and verified against the actual commit diffs between `v1.1.0` and `v1.2.0`; corrects several inaccuracies in the original tag message, which listed tools that already existed in 1.1.0 — firewall rules, NAT rules, port profiles, and `update_vm_network` — as newly added.)*
+
+### Fixed
+- Firewall rule create/update: the rule-name field settled on `name` (not `displayName`, which VCD's EdgeFirewallRule CloudAPI model rejects) — without it, created rules had no name and couldn't be found by name-based lookups afterward
+- `get_vm`: disk size read from the full VM entity XML lagged behind the `virtualHardwareSection/disks` sub-resource after a hot-resize, so verification checks could see stale values — now fetched in parallel, sub-resource takes precedence
+- `get_vm`/`update_vm_disk`: disk-item selection assumed the boot disk was always first in the XML — now explicitly sorts on InstanceID 2000, with a largest-capacity fallback for templates with non-standard InstanceID assignments
+- `delete_application_port_profile`: the DELETE path required the full URN, not a bare UUID — VCD returns HTTP 400 "Invalid urn string" otherwise
+- `update_vm_disk`: hot disk extend on a powered-on VM could fail via the legacy API — added a CloudAPI fallback (`/cloudapi/1.0.0/vms/{id}/disks/{id}`), plus a multi-level power-off/undeploy fallback for VMs vCD won't let power off individually while their vApp is deployed
+- `undeploy_vapp`/`power_off_vapp`: a vApp with one unresponsive VM could get permanently stuck — added a fallback that powers off each VM individually before retrying undeploy, and now accepts `MIXED` as a valid powered-off state
+- `list_vms`: the vApp container filter passed a full URN instead of the bare UUID vCD's `/query` filter requires, silently returning zero results
+- `update_vm_cpu`: a race condition could update the hot-add capability flag before the CPU resize task had actually completed; also fixed a malformed `VmCapabilities` XML element name/namespace, and stopped resetting `coresPerSocket` on hot-add (which could break the VM's socket topology and get the change rejected)
+
+### Added
+- CPU hot-add (`update_vm_cpu`: `cpuHotAdd` parameter), with a guard blocking hot-remove on powered-on VMs
+- Memory hot-add (`update_vm_memory`: `memoryHotAdd` parameter), with a guard blocking hot-add across the 3 GB boundary on powered-on VMs — VMware KB 343190, Linux guests can freeze if this boundary is crossed while running
+- Safety guards blocking CPU hot-remove, memory reduction, and disk shrink on powered-on VMs, each with a clear error instead of an opaque vCD rejection
+
+### Test infrastructure
+- Jest integration suite expanded to cover all 56 MCP tools (133 tests, 5 suites); enforced serial execution (`--runInBand`) since tests share live VCD fixtures and concurrent runs caused task-lock errors
+- `globalSetup`/`globalTeardown` provision and clean up dedicated test vApps automatically; stale vApp detection before each run
+- Structured `jest-results` log reporter
+- Numerous fixture/assertion fixes for VCD-specific edge cases (symbolic vs UUID port-profile URNs, numeric vs string power-state codes, catalog template search ordering)
+
+---
+
 ## [1.1.0] — 2026-06-22
 
 **Fork release — based on [Zettagrid/zettagrid-vmware-mcp](https://github.com/Zettagrid/zettagrid-vmware-mcp) v1.0.0**
