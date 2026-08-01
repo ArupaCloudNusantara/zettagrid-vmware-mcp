@@ -297,15 +297,13 @@ describe('UC-NET-002 — Update an Existing Firewall Rule', () => {
 
   test('update_firewall_rule changes action from ALLOW to DROP', async () => {
     log.separator(UC + ': update_firewall_rule');
+    // FIX #1 & #3: Fail hard if rule ID wasn't captured — don't use fallback
     if (!created.firewallRuleId) {
-      log.warn('No created ruleId — fetching first user-defined rule');
-      const rules = toArray(await client.call('list_firewall_rules', {
-        edgeGatewayId: resolvedEdgeGatewayId,
-      }));
-      // Only use user-defined rules (not default/system rules) — default rules are read-only
-      const userRule = rules.find(r => !r._isDefault && (get(r, 'id') || get(r, 'ruleId')));
-      expect(userRule).toBeTruthy();
-      created.firewallRuleId = get(userRule, 'id') || get(userRule, 'ruleId');
+      const errorMsg = 'Failed to capture firewall rule ID from UC-NET-001. Cannot proceed with update test. ' +
+                       'Check if rule creation returned an ID or if polling found the newly created rule.';
+      log.error(`❌ ${errorMsg}`);
+      expect(created.firewallRuleId).toBeTruthy();
+      return; // Skip remaining tests in this suite
     }
 
     const result = await client.call('update_firewall_rule', {
@@ -401,13 +399,17 @@ describe('UC-NET-004 — Create a DNAT Rule', () => {
       await new Promise(r => setTimeout(r, 2000));
       const rules = toArray(await client.call('list_nat_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
       const found = rules.find(r => r.name === natRuleName || r.displayName === natRuleName);
-      if (found) ruleId = get(found, 'id') || get(found, 'natRuleId') || get(found, 'ruleId');
-      else if (rules.length > 0) {
-        // Fallback: use the last rule added (likely ours)
-        const last = rules[rules.length - 1];
-        ruleId = get(last, 'id') || get(last, 'natRuleId') || get(last, 'ruleId');
+      if (found) {
+        ruleId = get(found, 'id') || get(found, 'natRuleId') || get(found, 'ruleId');
+        log.debug(`NAT rule list lookup: found by name, ruleId=${ruleId}`);
+      } else {
+        // FIX #2 & #3: Don't use last-rule fallback — it could delete an existing system rule!
+        const errorMsg = `Failed to find NAT rule "${natRuleName}" by name after creation. ` +
+                        `Cannot identify which rule was created. Refusing to use fallback logic to avoid deleting existing rules.`;
+        log.error(`❌ ${errorMsg}`);
+        expect(found).toBeTruthy(); // Fail the test
+        return;
       }
-      log.debug(`NAT rule list lookup: found ruleId=${ruleId}`);
     }
     created.natRuleId = ruleId;
     log.result(UC, 'create_nat_rule DNAT', !!result, `natRuleId=${ruleId}`);
