@@ -883,7 +883,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_vapp',
-          description: 'Deploy a new vApp from a catalog template. IMPORTANT: All VM configuration (name, network, OVF properties) must go inside instantiationParams.vmConfigs — top-level vmConfigs/ovfProperties are silently ignored. CPU/memory/disk are NOT applied during instantiation (vCD limitation) — use update_vm_cpu/update_vm_memory/update_vm_disk afterward (sequentially, waiting for each task). Typical workflow: create_vapp → get_task until success → update_vm_disk → get_task → update_vm_memory → get_task → power_on_vapp. Network auto-discovery: if vmConfigs omit networkConnections and only one routed network exists it is used automatically (POOL mode); if multiple networks exist returns CLARIFICATION_REQUIRED — call list_org_networks first.',
+          description: 'Deploy a new vApp from a catalog template. IMPORTANT: All VM configuration (name, network, OVF properties) must go inside instantiationParams.vmConfigs — top-level vmConfigs/ovfProperties are silently ignored. CPU/memory/disk are NOT applied during instantiation (vCD limitation) — use update_vm_cpu/update_vm_memory/update_vm_disk afterward (sequentially, waiting for each task). Typical workflow: create_vapp → get_task until success → update_vm_disk → get_task → update_vm_memory → get_task → power_on_vapp. Network auto-discovery: if vmConfigs omit networkConnections and the VDC has exactly one network of any kind (routed or isolated) it is used automatically (POOL mode); if more than one exists (of any kind — isolated networks are valid options too, not just routed) returns CLARIFICATION_REQUIRED listing all of them with a networkType field — call list_org_networks first if you want to see them without triggering the check.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -1095,7 +1095,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'add_vm_to_vapp',
-          description: 'Add a VM from a catalog template into an existing vApp. The vApp must already exist (use create_vapp or list_vapps to find it). Network ipMode defaults to POOL when pool IPs are available; if pool is exhausted and vdcId is provided, clarification is requested. Compute overrides (CPU, memory, disk) are not applied during instantiation — use update_vm_cpu / update_vm_memory / update_vm_disk on the new VM afterward.',
+          description: 'Add a VM from a catalog template into an existing vApp. The vApp must already exist (use create_vapp or list_vapps to find it). If networkConnections is omitted: with exactly one network already configured on the vApp, it is used automatically; with more than one, CLARIFICATION_REQUIRED is returned listing the vApp\'s existing networks — specify networkConnections to pick one (only networks the vApp already has can be used; this tool cannot bridge in a new one). Network ipMode defaults to POOL when pool IPs are available; if pool is exhausted and vdcId is provided, clarification is requested. Compute overrides (CPU, memory, disk) are not applied during instantiation — use update_vm_cpu / update_vm_memory / update_vm_disk on the new VM afterward.',
           inputSchema: {
             type: 'object',
             properties: {

@@ -291,27 +291,31 @@ export class ZettagridClient {
    * Format MCP tool response
    */
   private formatMcpResponse<T>(
-    data: T, 
-    zoneId: string, 
+    data: T,
+    zoneId: string,
     error?: { code: string; message: string; details?: any }
   ): McpToolResponse<T> {
     const zoneConfig = this.zoneManager.getZoneConfig(zoneId);
-    
+
+    // `data` must always be attached, error or not — many call sites intentionally pass
+    // diagnostic data ALONGSIDE an error (CLARIFICATION_REQUIRED's availableNetworks,
+    // exhausted-pool details, orphanVmId, delete_vapp's multi-VM guard details, etc.), and
+    // their own error messages tell the caller to look in `data` for that clarifying data.
+    // The previous else-branch here silently dropped `data` on every single error response.
     const response: McpToolResponse<T> = {
       success: !error,
       metadata: {
         zone: zoneId,
         organization: zoneConfig.organizationName,
         timestamp: new Date().toISOString()
-      }
+      },
+      data,
     };
-    
+
     if (error) {
       response.error = error;
-    } else {
-      response.data = data;
     }
-    
+
     return response;
   }
 
@@ -1122,10 +1126,14 @@ export class ZettagridClient {
     </InstantiationParams>`;
   }
 
-  /** Fetch routed org VDC networks available in a given VDC for auto-discovery during VM creation */
+  /** Fetch all org VDC networks available in a given VDC for auto-discovery during VM creation
+   *  — routed AND isolated (and any other type). Do not filter by linkType: a caller may
+   *  legitimately want an isolated network (e.g. internal-only VMs), and both createVApp's
+   *  auto-discovery and add_vm_to_vapp's clarification path should offer every real option,
+   *  not silently assume routed is the only kind worth listing. */
   private async fetchVdcNetworkOptions(vdcId: string, zoneId?: string): Promise<Array<{
     name: string; href: string; defaultGateway?: string; subnetPrefixLength?: number;
-    availableIps: number; totalIps: number;
+    availableIps: number; totalIps: number; linkType?: number;
   }>> {
     try {
       const response = await this.makeRequest<string>({
@@ -1136,7 +1144,7 @@ export class ZettagridClient {
       const xml = response.data as unknown as string;
       const records = parseQueryResults(xml);
       return records
-        .filter(r => r.vdc && String(r.vdc).includes(vdcId) && Number(r.linkType) === 1)
+        .filter(r => r.vdc && String(r.vdc).includes(vdcId))
         .map(r => ({
           name: String(r.name ?? ''),
           href: String(r.href ?? ''),
@@ -1144,6 +1152,7 @@ export class ZettagridClient {
           subnetPrefixLength: r.subnetPrefixLength ? Number(r.subnetPrefixLength) : undefined,
           availableIps: (Number(r.totalIpCount) || 0) - (Number(r.usedIpCount) || 0),
           totalIps: Number(r.totalIpCount) || 0,
+          linkType: r.linkType !== undefined ? Number(r.linkType) : undefined,
         }));
     } catch {
       return [];
@@ -1371,7 +1380,7 @@ export class ZettagridClient {
             : []);
 
       // Lazy-fetch VDC networks once; reused by both auto-discovery and IP-mode resolution
-      let cachedNets: Array<{ name: string; href: string; defaultGateway?: string; subnetPrefixLength?: number; availableIps: number; totalIps: number }> | undefined;
+      let cachedNets: Array<{ name: string; href: string; defaultGateway?: string; subnetPrefixLength?: number; availableIps: number; totalIps: number; linkType?: number }> | undefined;
       const getNets = async () => {
         if (!cachedNets) cachedNets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
         return cachedNets;
@@ -1392,6 +1401,7 @@ export class ZettagridClient {
               needsClarification: true,
               availableNetworks: nets.map(n => ({
                 networkName: n.name,
+                networkType: n.linkType === 1 ? 'routed' : n.linkType === 2 ? 'isolated' : 'unknown',
                 availableIps: n.availableIps,
                 totalIps: n.totalIps,
                 gateway: n.defaultGateway,
@@ -1506,27 +1516,33 @@ export class ZettagridClient {
         templateVms = await this.fetchTemplateVmHrefs(templateId, zoneId);
       }
 
-      // Build map: user-specified org network name → template VM NIC network name.
-      // When populated, the vApp network is named like the template (e.g. "VM Network")
-      // and is bridged to the org network — the VM's NIC already matches so no
-      // NetworkAssignment element is needed.
+      // Build map: user-specified org network name → template VM NIC network name, and
+      // auto-populate the vApp-level networkConfig with that template name — but ONLY when no
+      // networkConfig has been set yet at this point. A networkConfig can already be set here
+      // via the single-routed-network auto-discovery branch above (using the real org network
+      // name, e.g. "DC_1138718") or by the caller explicitly. In either of those cases the vApp's
+      // NetworkConfigSection is already using a real (non-template) name; renaming the NIC to the
+      // template's name here — while leaving that vApp-level entry alone — would point the NIC at
+      // a vApp network that doesn't exist ("entity network 'VM Network' does not exist"). This
+      // exact mismatch was confirmed live: single-network auto-discovery sets networkConfig using
+      // the real org name, then this block used to unconditionally rename the NIC to the
+      // template's name regardless, breaking the two apart. When networkConfig is already set,
+      // networkNameMap stays empty, so the NIC keeps its real name and computeNetworkAssignments
+      // (below) emits a proper NetworkAssignment bridging the template name to it instead.
       const networkNameMap = new Map<string, string>();
-      const firstVmTemplateNets = templateVms[0]?.templateNetworks ?? [];
-      if (firstVmTemplateNets.length > 0) {
-        resolvedVmConfigs.forEach(cfg => {
-          cfg.networkConnections?.forEach((nc, i) => {
-            const templateNet = firstVmTemplateNets[i] ?? firstVmTemplateNets[0]!;
-            if (templateNet && templateNet !== nc.networkName) {
-              networkNameMap.set(nc.networkName, templateNet);
-            }
-          });
-        });
-      }
-
-      // Auto-populate vApp-level networkConfig when user supplied networkConnections but no
-      // networkConfig. Use the template's internal network name as the vApp network name so
-      // the VM's NIC matches without NetworkAssignment.
       if (!resolvedParams?.networkConfig?.length) {
+        const firstVmTemplateNets = templateVms[0]?.templateNetworks ?? [];
+        if (firstVmTemplateNets.length > 0) {
+          resolvedVmConfigs.forEach(cfg => {
+            cfg.networkConnections?.forEach((nc, i) => {
+              const templateNet = firstVmTemplateNets[i] ?? firstVmTemplateNets[0]!;
+              if (templateNet && templateNet !== nc.networkName) {
+                networkNameMap.set(nc.networkName, templateNet);
+              }
+            });
+          });
+        }
+
         const neededNames = new Set<string>();
         resolvedVmConfigs.forEach(c => c.networkConnections?.forEach(nc => neededNames.add(nc.networkName)));
         if (neededNames.size > 0) {
@@ -1653,6 +1669,30 @@ export class ZettagridClient {
       const vmHrefs = templateVms;
 
       let finalVmConfig: VAppVmConfig = { ...vmConfig, vmName };
+
+      // When the caller omits networkConnections entirely, decide based on what the vApp
+      // itself already has configured — add_vm_to_vapp can only attach to a network the vApp
+      // already has (see NETWORK_NOT_CONFIGURED_ON_VAPP below; recomposeVApp can't bridge a new
+      // one in). Exactly one existing network is unambiguous — use it. More than one means we
+      // can't guess which the caller wants; ask instead of silently leaving the VM on the
+      // template's own (often broken/nonexistent) default network — the exact failure mode a
+      // real MCP user hit. Zero existing networks: fall through unchanged (nothing usable to
+      // pick from without a portal change first).
+      if (!finalVmConfig.networkConnections?.length) {
+        const existingVappNetworks = [...await this.fetchVAppNetworkNames(vappId, zoneId)];
+        if (existingVappNetworks.length === 1) {
+          finalVmConfig = { ...finalVmConfig, networkConnections: [{ networkName: existingVappNetworks[0]! }] };
+        } else if (existingVappNetworks.length > 1) {
+          return this.formatMcpResponse(
+            { needsClarification: true, availableNetworks: existingVappNetworks },
+            zone,
+            {
+              code: 'CLARIFICATION_REQUIRED',
+              message: `This vApp has ${existingVappNetworks.length} networks configured (${existingVappNetworks.join(', ')}) — specify networkConnections (networkName + optionally ipMode) so the new VM connects to the right one.`,
+            }
+          );
+        }
+      }
 
       // Resolve missing ipMode on network connections
       const hasUnresolvedIpMode = finalVmConfig.networkConnections?.some(nc => !nc.ipMode);

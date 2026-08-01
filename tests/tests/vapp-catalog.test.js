@@ -162,6 +162,211 @@ describe('UC-VA-001 — Deploy a vApp from Catalog Template', () => {
   });
 });
 
+// ─── Regression: create_vapp's single-routed-network auto-discovery set the vApp-level
+// NetworkConfig using the real org network name, but then unconditionally renamed the VM's
+// NIC to the template's own internal network name (e.g. "VM Network") when building the
+// SourcedItem — leaving the vApp's NetworkConfigSection and the VM's NIC pointing at two
+// different names. vCD rejected this with "entity network 'VM Network' does not exist", even
+// though the tool's own response metadata (data.autoConfigured) reported a resolved network.
+// Reported live by an MCP user testing a plain "create a VM" prompt with no network specified. ──
+describe('create_vapp Regression — single-network auto-discovery applies correctly', () => {
+  const UC = 'CVA-AUTO';
+  let autoVappId;
+  let explicitConfigVappId;
+
+  async function cleanupVapp(vappId) {
+    if (!vappId) return;
+    try {
+      await client.call('power_off_vapp', { vappId }).catch(() => {});
+      const r = await client.call('delete_vapp', { vappId });
+      const tid = get(r, 'data', 'taskId') || get(r, 'taskId');
+      if (tid) await waitForTask(client, tid).catch(() => {});
+    } catch (e) {
+      log.warn(`${UC}: teardown delete_vapp(${vappId}) failed: ${e.message}`);
+    }
+  }
+
+  afterAll(async () => {
+    await cleanupVapp(autoVappId);
+    await cleanupVapp(explicitConfigVappId);
+  });
+
+  test('create_vapp with no networkConnections (pure auto-discovery) succeeds and the VM lands on the resolved network', async () => {
+    log.separator(UC + ': create_vapp with auto-discovery only');
+
+    const vdcs = toArray(await client.call('list_vdcs', {}));
+    const vdc  = vdcs.find(v => v.name === cfg.fixtures.vdcName);
+    const vdcId = vdc?.id || vdc?.vdcId;
+    if (!vdcId) { log.warn(`${UC}: VDC "${cfg.fixtures.vdcName}" not found — skipping`); return; }
+
+    // Scoped to this vdcId and counting ALL network types (routed + isolated) — auto-discovery
+    // only auto-applies with exactly one network of any kind in the VDC, not just routed ones.
+    const nets = toArray(await client.call('list_org_networks', {}));
+    const vdcNetCount = nets.filter(n => String(n.vdc || '').includes(vdcId)).length;
+    if (vdcNetCount !== 1) {
+      log.warn(`${UC}: auto-discovery only auto-applies with exactly 1 network in the VDC (found ${vdcNetCount}) — skipping`);
+      return;
+    }
+
+    const cats = toArray(await client.call('list_catalogs', {}));
+    let match;
+    for (const cat of cats) {
+      const items = toArray(await client.call('list_catalog_items', { catalogId: cat.id || cat.catalogId }));
+      match = items.find(i => (i.entityType || '').toLowerCase().includes('vapptemplate')) || match;
+      if (match) break;
+    }
+    const templateId = match?.entityHref || match?.href;
+    expect(templateId).toBeTruthy();
+
+    const vappName = `test-vapp-auto-${Date.now()}`;
+    // Deliberately omit networkConnections — an empty vmConfigs entry triggers create_vapp's
+    // own single-routed-network auto-discovery instead of an explicit override. This is
+    // exactly the code path that was broken.
+    const result = await client.call('create_vapp', {
+      vappName,
+      templateId,
+      vdcId,
+      instantiationParams: { vmConfigs: [{}] },
+    }, cfg.timeouts.taskPoll);
+
+    autoVappId = get(result, 'data', 'vappId') || get(result, 'vappId');
+    const taskId = get(result, 'data', 'taskId') || get(result, 'taskId');
+    if (taskId) await waitForTask(client, taskId, cfg.timeouts.taskPoll);
+
+    const succeeded = result?.success !== false;
+    log.result(UC, 'create_vapp with auto-discovery succeeds', succeeded,
+      `error="${result?.error?.message || ''}" autoConfigured=${JSON.stringify(get(result, 'data', 'autoConfigured'))}`);
+    expect(succeeded).toBe(true);
+    expect(autoVappId).toBeTruthy();
+
+    const vms = toArray(await client.call('list_vms', { vappId: autoVappId }));
+    const vm  = vms[0];
+    if (!vm?.id) { log.warn(`${UC}: no VM found in auto-created vApp — skipping NIC check`); return; }
+
+    const vmData = get(await client.call('get_vm', { vmId: vm.id }), 'data') || {};
+    const nic = toArray(vmData.networkConnections)[0];
+    const resolvedNetwork = get(result, 'data', 'autoConfigured', 'network');
+    log.result(UC, 'VM NIC actually lands on the auto-resolved network (not the template\'s own network)',
+      nic?.network === resolvedNetwork, `resolvedNetwork=${resolvedNetwork} actualNicNetwork=${nic?.network}`);
+    expect(nic?.network).toBe(resolvedNetwork);
+  });
+
+  // Deterministic reproduction of the same underlying bug, independent of how many routed
+  // networks the VDC happens to have (the test above only exercises the auto-discovery
+  // trigger, which requires exactly 1). Pre-supplying networkConfig with a real org network
+  // name — exactly what auto-discovery itself produces internally — plus matching
+  // networkConnections exercises the identical "networkConfig already set with a real,
+  // non-template name" code path that was broken.
+  test('create_vapp with pre-set networkConfig + matching networkConnections keeps the vApp network and NIC in sync', async () => {
+    log.separator(UC + ': create_vapp with explicit networkConfig matching networkConnections');
+
+    const vdcs = toArray(await client.call('list_vdcs', {}));
+    const vdc  = vdcs.find(v => v.name === cfg.fixtures.vdcName);
+    const vdcId = vdc?.id || vdc?.vdcId;
+    if (!vdcId) { log.warn(`${UC}: VDC "${cfg.fixtures.vdcName}" not found — skipping`); return; }
+
+    const nets = toArray(await client.call('list_org_networks', {}));
+    const net  = nets.find(n => Number(n.linkType) === 1);
+    if (!net?.name || !net?.href) { log.warn(`${UC}: no routed org network with an href found — skipping`); return; }
+
+    const cats = toArray(await client.call('list_catalogs', {}));
+    let match;
+    for (const cat of cats) {
+      const items = toArray(await client.call('list_catalog_items', { catalogId: cat.id || cat.catalogId }));
+      match = items.find(i => (i.entityType || '').toLowerCase().includes('vapptemplate')) || match;
+      if (match) break;
+    }
+    const templateId = match?.entityHref || match?.href;
+    expect(templateId).toBeTruthy();
+
+    const vappName = `test-vapp-explicit-${Date.now()}`;
+    const result = await client.call('create_vapp', {
+      vappName,
+      templateId,
+      vdcId,
+      instantiationParams: {
+        networkConfig: [{ networkName: net.name, parentNetworkHref: net.href, fenceMode: 'bridged' }],
+        vmConfigs: [{ networkConnections: [{ networkName: net.name, ipMode: 'DHCP' }] }],
+      },
+    }, cfg.timeouts.taskPoll);
+
+    explicitConfigVappId = get(result, 'data', 'vappId') || get(result, 'vappId');
+    const taskId = get(result, 'data', 'taskId') || get(result, 'taskId');
+    if (taskId) await waitForTask(client, taskId, cfg.timeouts.taskPoll);
+
+    const succeeded = result?.success !== false;
+    log.result(UC, 'create_vapp with pre-set networkConfig succeeds', succeeded, `error="${result?.error?.message || ''}"`);
+    expect(succeeded).toBe(true);
+    expect(explicitConfigVappId).toBeTruthy();
+
+    const vms = toArray(await client.call('list_vms', { vappId: explicitConfigVappId }));
+    const vm  = vms[0];
+    if (!vm?.id) { log.warn(`${UC}: no VM found — skipping NIC check`); return; }
+
+    const vmData = get(await client.call('get_vm', { vmId: vm.id }), 'data') || {};
+    const nic = toArray(vmData.networkConnections)[0];
+    log.result(UC, `VM NIC lands on "${net.name}" (not silently renamed to the template's own network)`,
+      nic?.network === net.name, `expected=${net.name} actual=${nic?.network}`);
+    expect(nic?.network).toBe(net.name);
+  });
+
+  test('create_vapp with >1 routed network and no networkConnections asks for clarification instead of guessing', async () => {
+    log.separator(UC + ': create_vapp multi-network clarification');
+
+    const vdcs = toArray(await client.call('list_vdcs', {}));
+    const vdc  = vdcs.find(v => v.name === cfg.fixtures.vdcName);
+    const vdcId = vdc?.id || vdc?.vdcId;
+    if (!vdcId) { log.warn(`${UC}: VDC "${cfg.fixtures.vdcName}" not found — skipping`); return; }
+
+    // Must be scoped to THIS vdcId, matching fetchVdcNetworkOptions' own filter exactly
+    // (r.vdc.includes(vdcId)) — list_org_networks itself is org-wide, not VDC-scoped, so
+    // counting its raw results caused a false positive here once already (each VDC in this
+    // org has only 1 ROUTED network of its own — 2 only showed up when counted across both
+    // VDCs together). Counts ALL network types (routed + isolated), not routed-only —
+    // create_vapp's auto-discovery itself doesn't assume routed is the only valid kind.
+    const nets = toArray(await client.call('list_org_networks', {}));
+    const vdcNetCount = nets.filter(n => String(n.vdc || '').includes(vdcId)).length;
+    if (vdcNetCount < 2) {
+      log.warn(`${UC}: this check needs >1 network scoped to ${cfg.fixtures.vdcName} (found ${vdcNetCount}) — skipping`);
+      return;
+    }
+
+    const cats = toArray(await client.call('list_catalogs', {}));
+    let match;
+    for (const cat of cats) {
+      const items = toArray(await client.call('list_catalog_items', { catalogId: cat.id || cat.catalogId }));
+      match = items.find(i => (i.entityType || '').toLowerCase().includes('vapptemplate')) || match;
+      if (match) break;
+    }
+    const templateId = match?.entityHref || match?.href;
+    expect(templateId).toBeTruthy();
+
+    // No networkConnections at all — should ask which network to use, not silently pick one.
+    const result = await client.call('create_vapp', {
+      vappName: `test-vapp-shouldnotexist-${Date.now()}`,
+      templateId,
+      vdcId,
+      instantiationParams: { vmConfigs: [{}] },
+    });
+
+    // Safety net: if the assertions below fail because a vApp got created anyway (the exact
+    // mistake that leaked a vApp once already), clean it up regardless of test outcome.
+    const unexpectedVappId = get(result, 'data', 'vappId');
+    if (unexpectedVappId) {
+      log.warn(`${UC}: create_vapp unexpectedly created a vApp (${unexpectedVappId}) instead of asking for clarification — deleting it`);
+      await cleanupVapp(unexpectedVappId);
+    }
+
+    const needsClarification = result?.error?.code === 'CLARIFICATION_REQUIRED' && get(result, 'data', 'needsClarification') === true;
+    const options = toArray(get(result, 'data', 'availableNetworks'));
+    log.result(UC, 'create_vapp asks for clarification with >1 network', needsClarification, `code=${result?.error?.code} optionCount=${options.length}`);
+    expect(needsClarification).toBe(true);
+    expect(options.length).toBe(vdcNetCount);
+    // Nothing should have been created — this is a clarification response, not a vApp.
+    expect(unexpectedVappId).toBeFalsy();
+  });
+});
+
 // ─── UC-VA-002: Add VM to vApp ────────────────────────────────────────────
 describe('UC-VA-002 — Add VM to Existing vApp from Catalog', () => {
   const UC = 'UC-VA-002';
@@ -377,6 +582,158 @@ describe('H1 Regression — add_vm_to_vapp error/orphan reporting', () => {
     const mentionsCleanup = created.lastAddVmMessage?.includes('delete_vm') ?? false;
     log.result(UC, 'response message references delete_vm for the async-failure case', mentionsCleanup, created.lastAddVmMessage);
     expect(mentionsCleanup).toBe(true);
+  });
+});
+
+// ─── Regression: add_vm_to_vapp previously had no handling at all for a caller omitting
+// networkConnections — it silently left the new VM without any network override, on the
+// template's own (often broken/nonexistent) default network. Now: with exactly one network
+// already configured on the vApp, that network is used automatically (no ambiguity); with
+// more than one, CLARIFICATION_REQUIRED is returned instead of guessing. Reported live by an
+// MCP user hitting the equivalent gap in create_vapp's own auto-discovery. ───────────────────
+describe('add_vm_to_vapp Regression — network auto-apply / clarification when omitted', () => {
+  const UC = 'AVTV-NET';
+  let multiNetVappId;
+
+  afterAll(async () => {
+    if (!multiNetVappId) return;
+    try {
+      await client.call('power_off_vapp', { vappId: multiNetVappId }).catch(() => {});
+      const r = await client.call('delete_vapp', { vappId: multiNetVappId });
+      const tid = get(r, 'data', 'taskId') || get(r, 'taskId');
+      if (tid) await waitForTask(client, tid).catch(() => {});
+    } catch (e) {
+      log.warn(`${UC}: teardown delete_vapp(${multiNetVappId}) failed: ${e.message}`);
+    }
+  });
+
+  test('add_vm_to_vapp with no networkConnections auto-applies the vApp\'s single existing network', async () => {
+    log.separator(UC + ': add_vm_to_vapp omitting networkConnections');
+    const vappId = created.vappId;
+    const vdcId  = created.vdcId;
+    if (!vappId || !vdcId || !created.vmWithNetworkTarget) { log.warn(`${UC}: no vappId/vdcId/known network from earlier tests — skipping`); return; }
+
+    const cats = toArray(await client.call('list_catalogs', {}));
+    let match;
+    for (const cat of cats) {
+      const items = toArray(await client.call('list_catalog_items', { catalogId: cat.id || cat.catalogId }));
+      match = items.find(i => (i.entityType || '').toLowerCase().includes('vapptemplate')) || match;
+      if (match) break;
+    }
+    const templateId = match?.entityHref || match?.href;
+    expect(templateId).toBeTruthy();
+
+    const vmName = `test-vm-noNetSpecified-${Date.now()}`;
+    const result = await client.call('add_vm_to_vapp', {
+      vappId,
+      templateId,
+      vmName,
+      vdcId,
+      // networkConnections deliberately omitted.
+    }, cfg.timeouts.taskPoll);
+
+    // If this vApp has ended up with >1 network by this point, the tool correctly asks for
+    // clarification instead of guessing — treat that as expected too rather than a failure.
+    if (result?.error?.code === 'CLARIFICATION_REQUIRED') {
+      log.warn(`${UC}: vApp has >1 network at this point — clarification correctly requested, skipping auto-apply assertion`);
+      return;
+    }
+
+    const succeeded = result?.success !== false;
+    log.result(UC, 'add_vm_to_vapp without networkConnections succeeds', succeeded, `error="${result?.error?.message || ''}"`);
+    expect(succeeded).toBe(true);
+
+    const taskId = get(result, 'data', 'taskId') || get(result, 'taskId');
+    if (taskId) await waitForTask(client, taskId, cfg.timeouts.taskPoll);
+
+    const vms   = toArray(await client.call('list_vms', { vappId }));
+    const added = vms.find(v => v.name === vmName);
+    if (!added?.id) { log.warn(`${UC}: could not find VM "${vmName}" — skipping NIC check`); return; }
+
+    const vmData = get(await client.call('get_vm', { vmId: added.id }), 'data') || {};
+    const nic = toArray(vmData.networkConnections)[0];
+    log.result(UC, `VM NIC auto-applied to the vApp's existing network "${created.vmWithNetworkTarget}"`,
+      nic?.network === created.vmWithNetworkTarget, `expected=${created.vmWithNetworkTarget} actual=${nic?.network}`);
+    expect(nic?.network).toBe(created.vmWithNetworkTarget);
+  });
+
+  test('add_vm_to_vapp on a vApp with >1 existing network asks for clarification and creates nothing', async () => {
+    log.separator(UC + ': add_vm_to_vapp on a multi-network vApp');
+
+    const vdcs = toArray(await client.call('list_vdcs', {}));
+    const vdc  = vdcs.find(v => v.name === cfg.fixtures.vdcName);
+    const vdcId = vdc?.id || vdc?.vdcId;
+    if (!vdcId) { log.warn(`${UC}: VDC "${cfg.fixtures.vdcName}" not found — skipping`); return; }
+
+    // Need at least 2 distinct networks of any kind in the VDC to build a dedicated
+    // multi-network test vApp (routed + isolated both count — a real example reported one
+    // VM with NICs on both "DC_1138718" (routed) and "isolated").
+    const allNets = toArray(await client.call('list_org_networks', {}));
+    const vdcNets = allNets.filter(n => String(n.vdc || '').includes(vdcId) && n.href);
+    if (vdcNets.length < 2) { log.warn(`${UC}: VDC has <2 networks (found ${vdcNets.length}) — skipping`); return; }
+    const [netA, netB] = vdcNets;
+
+    const cats = toArray(await client.call('list_catalogs', {}));
+    let match;
+    for (const cat of cats) {
+      const items = toArray(await client.call('list_catalog_items', { catalogId: cat.id || cat.catalogId }));
+      match = items.find(i => (i.entityType || '').toLowerCase().includes('vapptemplate')) || match;
+      if (match) break;
+    }
+    const templateId = match?.entityHref || match?.href;
+    expect(templateId).toBeTruthy();
+
+    // Build a dedicated, disposable vApp with a VM that has 2 NICs on 2 different networks —
+    // rather than depending on (and querying) a pre-existing, potentially important vApp.
+    const createResult = await client.call('create_vapp', {
+      vappName: `test-vapp-multinet-${Date.now()}`,
+      templateId,
+      vdcId,
+      instantiationParams: {
+        networkConfig: [
+          { networkName: netA.name, parentNetworkHref: netA.href, fenceMode: 'bridged' },
+          { networkName: netB.name, parentNetworkHref: netB.href, fenceMode: 'bridged' },
+        ],
+        vmConfigs: [{
+          networkConnections: [
+            { networkName: netA.name, ipMode: 'DHCP', index: 0 },
+            { networkName: netB.name, ipMode: 'DHCP', index: 1 },
+          ],
+        }],
+      },
+    }, cfg.timeouts.taskPoll);
+
+    multiNetVappId = get(createResult, 'data', 'vappId') || get(createResult, 'vappId');
+    const createTaskId = get(createResult, 'data', 'taskId') || get(createResult, 'taskId');
+    if (createTaskId) await waitForTask(client, createTaskId, cfg.timeouts.taskPoll);
+
+    const createSucceeded = createResult?.success !== false;
+    log.result(UC, 'setup: create_vapp with 2 networks succeeds', createSucceeded, `error="${createResult?.error?.message || ''}"`);
+    expect(createSucceeded).toBe(true);
+    if (!multiNetVappId) { log.warn(`${UC}: no vappId from setup create_vapp — skipping`); return; }
+
+    const multiNetNames = [netA.name, netB.name];
+    const vmsBefore = toArray(await client.call('list_vms', { vappId: multiNetVappId }));
+
+    const result = await client.call('add_vm_to_vapp', {
+      vappId: multiNetVappId,
+      templateId,
+      vmName: `should-not-be-created-${Date.now()}`,
+      // networkConnections deliberately omitted.
+    });
+
+    const needsClarification = result?.error?.code === 'CLARIFICATION_REQUIRED';
+    const options = toArray(get(result, 'data', 'availableNetworks'));
+    log.result(UC, 'add_vm_to_vapp asks for clarification on a multi-network vApp', needsClarification,
+      `code=${result?.error?.code} options=${JSON.stringify(options)}`);
+    expect(needsClarification).toBe(true);
+    expect(options.slice().sort()).toEqual(multiNetNames.slice().sort());
+
+    // Confirm nothing was actually added to the vApp.
+    const vmsAfter = toArray(await client.call('list_vms', { vappId: multiNetVappId }));
+    log.result(UC, 'no VM was added to the multi-network vApp', vmsAfter.length === vmsBefore.length,
+      `before=${vmsBefore.length} after=${vmsAfter.length}`);
+    expect(vmsAfter.length).toBe(vmsBefore.length);
   });
 });
 
