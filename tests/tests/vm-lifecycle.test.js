@@ -13,7 +13,7 @@ const cfg       = require('../config');
 const { makeLogger } = require('../logger');
 const { waitForTask, waitForVmPower, toArray, get, sleep } = require('../helpers');
 
-const log = makeLogger('vm-lifecycle');
+const log = makeLogger('vm-lifecycle.test');
 let client;
 
 beforeAll(async () => {

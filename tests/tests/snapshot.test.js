@@ -10,7 +10,7 @@ const cfg       = require('../config');
 const { makeLogger } = require('../logger');
 const { waitForTask, toArray, get, sleep } = require('../helpers');
 
-const log = makeLogger('snapshot');
+const log = makeLogger('snapshot.test');
 let client;
 
 // Snapshot created in UC-SNAP-001 and used in UC-SNAP-002

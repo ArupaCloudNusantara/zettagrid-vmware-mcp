@@ -10,7 +10,7 @@ const cfg       = require('../config');
 const { makeLogger } = require('../logger');
 const { waitForTask, waitForVappStatus, findInList, toArray, get } = require('../helpers');
 
-const log = makeLogger('vapp-catalog');
+const log = makeLogger('vapp-catalog.test');
 let client;
 
 // Track resources created during tests so teardown can clean up

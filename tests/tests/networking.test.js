@@ -12,7 +12,7 @@ const cfg       = require('../config');
 const { makeLogger } = require('../logger');
 const { toArray, findInList, get } = require('../helpers');
 
-const log = makeLogger('networking');
+const log = makeLogger('networking.test');
 let client;
 
 // Track IDs created during tests for teardown

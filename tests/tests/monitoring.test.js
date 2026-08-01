@@ -12,7 +12,7 @@ const cfg       = require('../config');
 const { makeLogger } = require('../logger');
 const { toArray, get } = require('../helpers');
 
-const log = makeLogger('monitoring');
+const log = makeLogger('monitoring.test');
 let client;
 
 // Discovered at runtime from list_vms — overrides placeholder fixtures
