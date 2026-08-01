@@ -18,10 +18,37 @@ let client;
 // Track IDs created during tests for teardown
 const created = { firewallRuleId: null, firewallRuleName: null, natRuleId: null, portProfileId: null };
 
+// Snapshots before/after tests to verify no leftover rules
+const snapshots = {
+  firewallRulesBefore: [],
+  firewallRulesAfter: [],
+  natRulesBefore: [],
+  natRulesAfter: [],
+};
+
 // Resolved at runtime — overrides placeholder fixtures if real IDs are discovered
 let resolvedEdgeGatewayId = cfg.fixtures.edgeGatewayId;
 let resolvedAppPortProfileId = cfg.fixtures.appPortProfileId;
 let resolvedVdcId = null;
+
+/**
+ * Capture firewall and NAT rule snapshots for verification
+ */
+async function captureRuleSnapshots(label) {
+  try {
+    const fwRules = toArray(await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
+    const natRules = toArray(await client.call('list_nat_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
+
+    const fwRuleIds = fwRules.map(r => get(r, 'id') || get(r, 'ruleId')).filter(Boolean);
+    const natRuleIds = natRules.map(r => get(r, 'id') || get(r, 'ruleId')).filter(Boolean);
+
+    log.info(`[${label}] Firewall rules: ${fwRuleIds.length}, NAT rules: ${natRuleIds.length}`);
+    return { fwRuleIds, natRuleIds };
+  } catch (e) {
+    log.warn(`Failed to capture rule snapshots (${label}): ${e.message}`);
+    return { fwRuleIds: [], natRuleIds: [] };
+  }
+}
 
 beforeAll(async () => {
   log.separator('Networking Suite — Setup');
@@ -72,6 +99,12 @@ beforeAll(async () => {
   } catch (e) {
     log.warn(`Could not discover VDC: ${e.message}`);
   }
+
+  // Capture initial firewall and NAT rule state for verification
+  log.info('Capturing initial firewall and NAT rule state...');
+  const initialSnapshot = await captureRuleSnapshots('BEFORE');
+  snapshots.firewallRulesBefore = initialSnapshot.fwRuleIds;
+  snapshots.natRulesBefore = initialSnapshot.natRuleIds;
 });
 
 afterAll(async () => {
@@ -98,6 +131,35 @@ afterAll(async () => {
       profileId: created.portProfileId,
     }).catch(e => log.warn(`Teardown port profile delete failed: ${e.message}`));
   }
+
+  // Verify firewall and NAT rules before and after are the same
+  log.info('Verifying firewall and NAT rule cleanup...');
+  const finalSnapshot = await captureRuleSnapshots('AFTER');
+  snapshots.firewallRulesAfter = finalSnapshot.fwRuleIds;
+  snapshots.natRulesAfter = finalSnapshot.natRuleIds;
+
+  // Compare snapshots
+  const fwBefore = new Set(snapshots.firewallRulesBefore);
+  const fwAfter = new Set(snapshots.firewallRulesAfter);
+  const natBefore = new Set(snapshots.natRulesBefore);
+  const natAfter = new Set(snapshots.natRulesAfter);
+
+  // Check for leftover firewall rules
+  const leftoverFwRules = [...fwAfter].filter(id => !fwBefore.has(id));
+  if (leftoverFwRules.length > 0) {
+    log.error(`❌ VERIFICATION FAILED: ${leftoverFwRules.length} leftover firewall rule(s) not cleaned up: ${leftoverFwRules.join(', ')}`);
+  } else {
+    log.info('✅ Firewall rules: Before and after match (no leftovers)');
+  }
+
+  // Check for leftover NAT rules
+  const leftoverNatRules = [...natAfter].filter(id => !natBefore.has(id));
+  if (leftoverNatRules.length > 0) {
+    log.error(`❌ VERIFICATION FAILED: ${leftoverNatRules.length} leftover NAT rule(s) not cleaned up: ${leftoverNatRules.join(', ')}`);
+  } else {
+    log.info('✅ NAT rules: Before and after match (no leftovers)');
+  }
+
   if (client) client.disconnect();
   log.separator('Networking Suite — Teardown complete');
 });
