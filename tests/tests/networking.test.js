@@ -134,60 +134,75 @@ afterAll(async () => {
 
   // Verify firewall and NAT rules before and after are the same
   log.info('Verifying firewall and NAT rule cleanup...');
-  const finalSnapshot = await captureRuleSnapshots('AFTER');
-  snapshots.firewallRulesAfter = finalSnapshot.fwRuleIds;
-  snapshots.natRulesAfter = finalSnapshot.natRuleIds;
+  try {
+    const finalSnapshot = await captureRuleSnapshots('AFTER');
+    snapshots.firewallRulesAfter = finalSnapshot.fwRuleIds;
+    snapshots.natRulesAfter = finalSnapshot.natRuleIds;
+    log.debug('Snapshots assigned, proceeding with comparison');
 
-  // Compare snapshots
-  const fwBefore = new Set(snapshots.firewallRulesBefore);
-  const fwAfter = new Set(snapshots.firewallRulesAfter);
-  const natBefore = new Set(snapshots.natRulesBefore);
-  const natAfter = new Set(snapshots.natRulesAfter);
+    // Compare snapshots
+    const fwBefore = new Set(snapshots.firewallRulesBefore);
+    const fwAfter = new Set(snapshots.firewallRulesAfter);
+    const natBefore = new Set(snapshots.natRulesBefore);
+    const natAfter = new Set(snapshots.natRulesAfter);
+    log.debug('Sets created, filtering leftover/deleted rules');
 
-  let verificationPassed = true;
+    let verificationPassed = true;
 
-  // Check for NEW leftover firewall rules (added during test, not cleaned up)
-  const leftoverFwRules = [...fwAfter].filter(id => !fwBefore.has(id));
-  if (leftoverFwRules.length > 0) {
-    log.error(`❌ VERIFICATION FAILED: ${leftoverFwRules.length} NEW leftover firewall rule(s) not cleaned up: ${leftoverFwRules.join(', ')}`);
-    verificationPassed = false;
+    // Check for NEW leftover firewall rules (added during test, not cleaned up)
+    const leftoverFwRules = [...fwAfter].filter(id => !fwBefore.has(id));
+    if (leftoverFwRules.length > 0) {
+      log.error(`❌ VERIFICATION FAILED: ${leftoverFwRules.length} NEW leftover firewall rule(s) not cleaned up: ${leftoverFwRules.join(', ')}`);
+      verificationPassed = false;
+    }
+
+    // Check for DELETED firewall rules (test accidentally deleted existing rules)
+    const deletedFwRules = [...fwBefore].filter(id => !fwAfter.has(id));
+    if (deletedFwRules.length > 0) {
+      log.error(`❌ VERIFICATION FAILED: ${deletedFwRules.length} firewall rule(s) were DELETED during test: ${deletedFwRules.join(', ')}`);
+      verificationPassed = false;
+    }
+
+    if (leftoverFwRules.length === 0 && deletedFwRules.length === 0) {
+      log.info('✅ Firewall rules: Before and after match (no changes)');
+    }
+
+    // Check for NEW leftover NAT rules
+    const leftoverNatRules = [...natAfter].filter(id => !natBefore.has(id));
+    if (leftoverNatRules.length > 0) {
+      log.error(`❌ VERIFICATION FAILED: ${leftoverNatRules.length} NEW leftover NAT rule(s) not cleaned up: ${leftoverNatRules.join(', ')}`);
+      verificationPassed = false;
+    }
+
+    // Check for DELETED NAT rules
+    const deletedNatRules = [...natBefore].filter(id => !natAfter.has(id));
+    if (deletedNatRules.length > 0) {
+      log.error(`❌ VERIFICATION FAILED: ${deletedNatRules.length} NAT rule(s) were DELETED during test: ${deletedNatRules.join(', ')}`);
+      verificationPassed = false;
+    }
+
+    if (leftoverNatRules.length === 0 && deletedNatRules.length === 0) {
+      log.info('✅ NAT rules: Before and after match (no changes)');
+    }
+
+    // Fail the test if verification failed
+    if (!verificationPassed) {
+      log.error('❌ NETWORK ISOLATION VIOLATED: Test modified existing system rules!');
+    }
+    log.debug('Verification complete, disconnecting client');
+  } catch (e) {
+    log.error(`Verification failed with error: ${e.message}`);
   }
 
-  // Check for DELETED firewall rules (test accidentally deleted existing rules)
-  const deletedFwRules = [...fwBefore].filter(id => !fwAfter.has(id));
-  if (deletedFwRules.length > 0) {
-    log.error(`❌ VERIFICATION FAILED: ${deletedFwRules.length} firewall rule(s) were DELETED during test: ${deletedFwRules.join(', ')}`);
-    verificationPassed = false;
+  try {
+    if (client) {
+      log.debug('Calling client.disconnect()');
+      client.disconnect();
+      log.debug('client.disconnect() returned');
+    }
+  } catch (e) {
+    log.warn(`Error during disconnect: ${e.message}`);
   }
-
-  if (leftoverFwRules.length === 0 && deletedFwRules.length === 0) {
-    log.info('✅ Firewall rules: Before and after match (no changes)');
-  }
-
-  // Check for NEW leftover NAT rules
-  const leftoverNatRules = [...natAfter].filter(id => !natBefore.has(id));
-  if (leftoverNatRules.length > 0) {
-    log.error(`❌ VERIFICATION FAILED: ${leftoverNatRules.length} NEW leftover NAT rule(s) not cleaned up: ${leftoverNatRules.join(', ')}`);
-    verificationPassed = false;
-  }
-
-  // Check for DELETED NAT rules
-  const deletedNatRules = [...natBefore].filter(id => !natAfter.has(id));
-  if (deletedNatRules.length > 0) {
-    log.error(`❌ VERIFICATION FAILED: ${deletedNatRules.length} NAT rule(s) were DELETED during test: ${deletedNatRules.join(', ')}`);
-    verificationPassed = false;
-  }
-
-  if (leftoverNatRules.length === 0 && deletedNatRules.length === 0) {
-    log.info('✅ NAT rules: Before and after match (no changes)');
-  }
-
-  // Fail the test if verification failed
-  if (!verificationPassed) {
-    log.error('❌ NETWORK ISOLATION VIOLATED: Test modified existing system rules!');
-  }
-
-  if (client) client.disconnect();
   log.separator('Networking Suite — Teardown complete');
 });
 
