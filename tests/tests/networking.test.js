@@ -138,14 +138,14 @@ afterAll(async () => {
     const finalSnapshot = await captureRuleSnapshots('AFTER');
     snapshots.firewallRulesAfter = finalSnapshot.fwRuleIds;
     snapshots.natRulesAfter = finalSnapshot.natRuleIds;
-    log.debug('Snapshots assigned, proceeding with comparison');
+    log.info('Snapshots assigned, proceeding with comparison');
 
     // Compare snapshots
     const fwBefore = new Set(snapshots.firewallRulesBefore);
     const fwAfter = new Set(snapshots.firewallRulesAfter);
     const natBefore = new Set(snapshots.natRulesBefore);
     const natAfter = new Set(snapshots.natRulesAfter);
-    log.debug('Sets created, filtering leftover/deleted rules');
+    log.info('Sets created, filtering leftover/deleted rules');
 
     let verificationPassed = true;
 
@@ -189,16 +189,16 @@ afterAll(async () => {
     if (!verificationPassed) {
       log.error('❌ NETWORK ISOLATION VIOLATED: Test modified existing system rules!');
     }
-    log.debug('Verification complete, disconnecting client');
+    log.info('Verification complete, disconnecting client');
   } catch (e) {
     log.error(`Verification failed with error: ${e.message}`);
   }
 
   try {
     if (client) {
-      log.debug('Calling client.disconnect()');
+      log.info('Calling client.disconnect()');
       client.disconnect();
-      log.debug('client.disconnect() returned');
+      log.info('client.disconnect() returned');
     }
   } catch (e) {
     log.warn(`Error during disconnect: ${e.message}`);
