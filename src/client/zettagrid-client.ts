@@ -1848,17 +1848,71 @@ export class ZettagridClient {
           const netMap = new Map(nets.map(n => [n.name, n]));
           const exhausted: Array<{ networkName: string; totalIps: number; networkHref?: string }> = [];
 
+          // For Ubuntu 24.04+, ask user to choose IP instead of defaulting to POOL/DHCP
+          const ubuntuNicsNeedingIp: Array<{ nic: VAppNetworkConnection; networkInfo: typeof nets[0] }> = [];
           const resolvedNics: VAppNetworkConnection[] = finalVmConfig.networkConnections!.map(nc => {
             if (nc.ipMode) return nc;
             const info = netMap.get(nc.networkName);
             if (info && info.availableIps > 0) {
-              // For Ubuntu 24.04+, default to DHCP instead of POOL to avoid cloud-init interference
-              const ipMode: 'DHCP' | 'POOL' = isUbuntuModern ? 'DHCP' : 'POOL';
+              if (isUbuntuModern) {
+                // For Ubuntu 24.04+, collect NICs that need IP selection
+                ubuntuNicsNeedingIp.push({ nic: nc, networkInfo: info });
+                return nc; // Return unresolved for now
+              }
+              const ipMode: 'DHCP' | 'POOL' = 'POOL';
               return { ...nc, ipMode };
             }
             exhausted.push({ networkName: nc.networkName, totalIps: info?.totalIps ?? 0, networkHref: info?.href });
             return nc;
           });
+
+          // If Ubuntu 24.04+ with available IPs, suggest IPs to user
+          if (isUbuntuModern && ubuntuNicsNeedingIp.length > 0) {
+            const suggestedIpsByNetwork: Record<string, { suggestedIps: string[]; gateway?: string; subnetMask?: string; dhcpAvailable?: boolean }> = {};
+
+            for (const { nic, networkInfo } of ubuntuNicsNeedingIp) {
+              const netDetail = await this.fetchNetworkDetailedConfig(networkInfo.href, zoneId);
+              if (netDetail?.ipRanges?.length) {
+                const range = netDetail.ipRanges[0]!;
+                const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5);
+                suggestedIpsByNetwork[nic.networkName] = {
+                  suggestedIps,
+                  gateway: netDetail.gateway,
+                  subnetMask: netDetail.subnetMask,
+                  dhcpAvailable: netDetail.dhcp
+                };
+              }
+            }
+
+            // If we got suggestions for at least one NIC, return clarification
+            if (Object.keys(suggestedIpsByNetwork).length > 0) {
+              return this.formatMcpResponse(
+                {
+                  needsClarification: true,
+                  vappId,
+                  vmName,
+                  reason: 'Ubuntu 24.04+ requires MANUAL IP mode instead of POOL (POOL mode interferes with cloud-init)',
+                  suggestedIpsByNetwork,
+                  options: [
+                    {
+                      ipMode: 'MANUAL',
+                      note: 'Recommended: select one of the suggested IPs for each NIC and call add_vm_to_vapp again with ipAddress field'
+                    },
+                    {
+                      ipMode: 'DHCP',
+                      note: 'Alternative: use DHCP if enabled on the network'
+                    },
+                  ],
+                  instructions: 'Call add_vm_to_vapp again with networkConnections including ipMode and ipAddress for MANUAL, or ipMode: "DHCP"',
+                },
+                zone,
+                {
+                  code: 'CLARIFICATION_REQUIRED',
+                  message: `Ubuntu 24.04+ detected. Please choose IP addresses from the suggestions for MANUAL mode configuration, or use DHCP mode.`,
+                }
+              );
+            }
+          }
 
           if (exhausted.length > 0) {
             return this.formatMcpResponse(
