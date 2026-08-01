@@ -1159,6 +1159,106 @@ export class ZettagridClient {
     }
   }
 
+  /** Fetch detailed network configuration including IP ranges and gateway */
+  private async fetchNetworkDetailedConfig(networkHref: string, zoneId?: string): Promise<{ gateway?: string; subnetMask?: string; ipRanges?: Array<{ startAddress: string; endAddress: string }>; dhcp?: boolean } | null> {
+    try {
+      const pathMatch = networkHref.match(/\/api(\/.+)/);
+      const relativePath = pathMatch?.[1] ?? networkHref;
+      const response = await this.makeRequest<string>({ method: 'GET', url: relativePath }, zoneId);
+      const xml = response.data as unknown as string;
+
+      // Extract gateway
+      const gatewayMatch = xml.match(/<Gateway>([^<]+)<\/Gateway>/);
+      const gateway = gatewayMatch?.[1];
+
+      // Extract subnet mask
+      const maskMatch = xml.match(/<Netmask>([^<]+)<\/Netmask>/);
+      const subnetMask = maskMatch?.[1];
+
+      // Extract IP ranges from StaticIpPool
+      const ipRanges: Array<{ startAddress: string; endAddress: string }> = [];
+      const rangeRe = /<IpRange>\s*<StartAddress>([^<]+)<\/StartAddress>\s*<EndAddress>([^<]+)<\/EndAddress>\s*<\/IpRange>/g;
+      let m;
+      while ((m = rangeRe.exec(xml)) !== null) {
+        if (m[1] && m[2]) {
+          ipRanges.push({ startAddress: m[1], endAddress: m[2] });
+        }
+      }
+
+      // Check if DHCP is enabled
+      const dhcpMatch = xml.match(/<DhcpService>\s*<IsEnabled>([^<]+)<\/IsEnabled>/);
+      const dhcp = dhcpMatch?.[1] === 'true';
+
+      return { gateway, subnetMask, ipRanges: ipRanges.length > 0 ? ipRanges : undefined, dhcp };
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /** Generate suggested available IPs from a network's IP range */
+  private generateSuggestedIps(gateway: string | undefined, startAddress: string | undefined, endAddress: string | undefined, count: number = 5): string[] {
+    try {
+      if (!startAddress || !endAddress) return [];
+
+      // Parse IP addresses
+      const parts = (str: string) => str.split('.').map(Number);
+      const start = parts(startAddress);
+      const end = parts(endAddress);
+
+      if (start.length !== 4 || end.length !== 4) return [];
+
+      // Convert to number for easier manipulation
+      const startNum = (start[0]! << 24) | (start[1]! << 16) | (start[2]! << 8) | start[3]!;
+      const endNum = (end[0]! << 24) | (end[1]! << 16) | (end[2]! << 8) | end[3]!;
+      const range = endNum - startNum;
+
+      const suggested: string[] = [];
+      if (range < 1) return [];
+
+      // Generate IPs spread across the range, avoiding gateway
+      const step = Math.max(1, Math.floor(range / (count + 1)));
+      for (let i = 1; i <= count && suggested.length < count; i++) {
+        const ip = startNum + (step * i);
+        if (ip >= startNum && ip <= endNum) {
+          const ipStr = `${(ip >>> 24) & 0xFF}.${(ip >>> 16) & 0xFF}.${(ip >>> 8) & 0xFF}.${ip & 0xFF}`;
+          // Skip gateway and broadcast
+          if (gateway && ipStr === gateway) continue;
+          if (ipStr === endAddress) continue;
+          suggested.push(ipStr);
+        }
+      }
+
+      return suggested.slice(0, count);
+    } catch {
+      return [];
+    }
+  }
+
+  /** Detect if template name indicates Ubuntu 24.04 or later */
+  private async isUbuntuModernTemplate(templateHref: string, zoneId?: string): Promise<boolean> {
+    try {
+      const pathMatch = templateHref.match(/\/api(\/.+)/);
+      const relativePath = pathMatch?.[1] ?? templateHref;
+      const response = await this.makeRequest<string>({ method: 'GET', url: relativePath }, zoneId);
+      const xml = response.data as unknown as string;
+
+      // Extract template name and description
+      const nameMatch = xml.match(/<VAppTemplate\b[^>]*name="([^"]+)"/i) || xml.match(/<Name>([^<]+)<\/Name>/);
+      const name = nameMatch?.[1]?.toLowerCase() ?? '';
+
+      const descMatch = xml.match(/<Description>([^<]*)<\/Description>/i);
+      const desc = descMatch?.[1]?.toLowerCase() ?? '';
+
+      const combined = `${name} ${desc}`;
+
+      // Check for Ubuntu 24.04 or later
+      // Patterns: "ubuntu 24", "ubuntu-24", "ubuntu 25", "noble", "oracular"
+      return /ubuntu\s*[2-9][4-9]|ubuntu\D*24\.|ubuntu\D*25\.|noble|oracular/.test(combined);
+    } catch {
+      return false;
+    }
+  }
+
   /** Fetch VM hrefs and their existing NIC network names from a vAppTemplate.
    *  Network names are needed to build NetworkAssignment elements that remap
    *  template NICs to vApp networks (without this vCD ignores the NIC override). */
@@ -1440,7 +1540,50 @@ export class ZettagridClient {
             );
           }
 
-          autoConfigured = { network: net.name, ipMode: 'POOL' };
+          // Ubuntu 24.04+ requires MANUAL IP mode instead of POOL (POOL mode enables guest customization
+          // which interferes with cloud-init). For these templates, ask user to choose from suggested IPs.
+          const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+
+          if (isUbuntuModern) {
+            // Fetch detailed network config to get IP ranges
+            const netDetail = await this.fetchNetworkDetailedConfig(net.href, zoneId);
+            if (netDetail?.ipRanges?.length) {
+              const range = netDetail.ipRanges[0]!;
+              const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5);
+
+              if (suggestedIps.length > 0) {
+                return this.formatMcpResponse(
+                  {
+                    needsClarification: true,
+                    network: net.name,
+                    reason: 'Ubuntu 24.04+ requires MANUAL IP mode instead of POOL (POOL mode interferes with cloud-init)',
+                    suggestedIps,
+                    gateway: netDetail.gateway,
+                    subnetMask: netDetail.subnetMask,
+                    dhcpAvailable: netDetail.dhcp,
+                    options: [
+                      {
+                        ipMode: 'MANUAL',
+                        note: 'Recommended: select one of the suggested IPs or provide your own in the ipAddress field'
+                      },
+                      {
+                        ipMode: 'DHCP',
+                        note: 'Alternative: use DHCP if enabled on the network'
+                      },
+                    ],
+                    instructions: 'Call create_vapp again with networkConnections: [{ networkName: "' + net.name + '", ipMode: "MANUAL", ipAddress: "<chosen-ip>" }] in instantiationParams.vmConfigs[0]',
+                  },
+                  zone,
+                  {
+                    code: 'CLARIFICATION_REQUIRED',
+                    message: `Ubuntu 24.04+ detected. Please choose one of the suggested IP addresses for MANUAL mode configuration, or use DHCP mode instead of POOL.`,
+                  }
+                );
+              }
+            }
+          }
+
+          autoConfigured = { network: net.name, ipMode: isUbuntuModern ? 'DHCP' : 'POOL' };
           resolvedParams = {
             ...instantiationParams,
             networkConfig: instantiationParams?.networkConfig?.length
@@ -1448,7 +1591,7 @@ export class ZettagridClient {
               : [{ networkName: net.name, parentNetworkHref: net.href, fenceMode: 'bridged' }],
             vmConfigs: effectiveVmConfigs.map(c => ({
               ...c,
-              networkConnections: [{ networkName: net.name, ipMode: 'POOL' as const }]
+              networkConnections: [{ networkName: net.name, ipMode: isUbuntuModern ? 'DHCP' : 'POOL' as const }]
             }))
           };
         }
@@ -1697,16 +1840,23 @@ export class ZettagridClient {
       // Resolve missing ipMode on network connections
       const hasUnresolvedIpMode = finalVmConfig.networkConnections?.some(nc => !nc.ipMode);
       if (hasUnresolvedIpMode) {
+        // Check if template is Ubuntu 24.04+ which requires MANUAL instead of POOL
+        const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+
         if (vdcId) {
           const nets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
           const netMap = new Map(nets.map(n => [n.name, n]));
-          const exhausted: Array<{ networkName: string; totalIps: number }> = [];
+          const exhausted: Array<{ networkName: string; totalIps: number; networkHref?: string }> = [];
 
-          const resolvedNics = finalVmConfig.networkConnections!.map(nc => {
+          const resolvedNics: VAppNetworkConnection[] = finalVmConfig.networkConnections!.map(nc => {
             if (nc.ipMode) return nc;
             const info = netMap.get(nc.networkName);
-            if (info && info.availableIps > 0) return { ...nc, ipMode: 'POOL' as const };
-            exhausted.push({ networkName: nc.networkName, totalIps: info?.totalIps ?? 0 });
+            if (info && info.availableIps > 0) {
+              // For Ubuntu 24.04+, default to DHCP instead of POOL to avoid cloud-init interference
+              const ipMode: 'DHCP' | 'POOL' = isUbuntuModern ? 'DHCP' : 'POOL';
+              return { ...nc, ipMode };
+            }
+            exhausted.push({ networkName: nc.networkName, totalIps: info?.totalIps ?? 0, networkHref: info?.href });
             return nc;
           });
 
@@ -1734,12 +1884,15 @@ export class ZettagridClient {
 
           finalVmConfig = { ...finalVmConfig, networkConnections: resolvedNics };
         } else {
-          // No vdcId — default unresolved NICs to POOL
+          // No vdcId — default unresolved NICs to POOL (or DHCP for Ubuntu 24.04+)
+          const defaultIpMode: 'DHCP' | 'POOL' = isUbuntuModern ? 'DHCP' : 'POOL';
+          const resolvedNics: VAppNetworkConnection[] = (finalVmConfig.networkConnections ?? []).map(nc => ({
+            ...nc,
+            ipMode: (nc.ipMode ?? defaultIpMode) as 'DHCP' | 'POOL' | 'MANUAL' | 'NONE'
+          }));
           finalVmConfig = {
             ...finalVmConfig,
-            networkConnections: finalVmConfig.networkConnections?.map(nc =>
-              nc.ipMode ? nc : { ...nc, ipMode: 'POOL' as const }
-            ),
+            networkConnections: resolvedNics,
           };
         }
       }
