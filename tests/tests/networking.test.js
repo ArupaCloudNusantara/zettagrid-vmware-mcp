@@ -144,20 +144,47 @@ afterAll(async () => {
   const natBefore = new Set(snapshots.natRulesBefore);
   const natAfter = new Set(snapshots.natRulesAfter);
 
-  // Check for leftover firewall rules
+  let verificationPassed = true;
+
+  // Check for NEW leftover firewall rules (added during test, not cleaned up)
   const leftoverFwRules = [...fwAfter].filter(id => !fwBefore.has(id));
   if (leftoverFwRules.length > 0) {
-    log.error(`❌ VERIFICATION FAILED: ${leftoverFwRules.length} leftover firewall rule(s) not cleaned up: ${leftoverFwRules.join(', ')}`);
-  } else {
-    log.info('✅ Firewall rules: Before and after match (no leftovers)');
+    log.error(`❌ VERIFICATION FAILED: ${leftoverFwRules.length} NEW leftover firewall rule(s) not cleaned up: ${leftoverFwRules.join(', ')}`);
+    verificationPassed = false;
   }
 
-  // Check for leftover NAT rules
+  // Check for DELETED firewall rules (test accidentally deleted existing rules)
+  const deletedFwRules = [...fwBefore].filter(id => !fwAfter.has(id));
+  if (deletedFwRules.length > 0) {
+    log.error(`❌ VERIFICATION FAILED: ${deletedFwRules.length} firewall rule(s) were DELETED during test: ${deletedFwRules.join(', ')}`);
+    verificationPassed = false;
+  }
+
+  if (leftoverFwRules.length === 0 && deletedFwRules.length === 0) {
+    log.info('✅ Firewall rules: Before and after match (no changes)');
+  }
+
+  // Check for NEW leftover NAT rules
   const leftoverNatRules = [...natAfter].filter(id => !natBefore.has(id));
   if (leftoverNatRules.length > 0) {
-    log.error(`❌ VERIFICATION FAILED: ${leftoverNatRules.length} leftover NAT rule(s) not cleaned up: ${leftoverNatRules.join(', ')}`);
-  } else {
-    log.info('✅ NAT rules: Before and after match (no leftovers)');
+    log.error(`❌ VERIFICATION FAILED: ${leftoverNatRules.length} NEW leftover NAT rule(s) not cleaned up: ${leftoverNatRules.join(', ')}`);
+    verificationPassed = false;
+  }
+
+  // Check for DELETED NAT rules
+  const deletedNatRules = [...natBefore].filter(id => !natAfter.has(id));
+  if (deletedNatRules.length > 0) {
+    log.error(`❌ VERIFICATION FAILED: ${deletedNatRules.length} NAT rule(s) were DELETED during test: ${deletedNatRules.join(', ')}`);
+    verificationPassed = false;
+  }
+
+  if (leftoverNatRules.length === 0 && deletedNatRules.length === 0) {
+    log.info('✅ NAT rules: Before and after match (no changes)');
+  }
+
+  // Fail the test if verification failed
+  if (!verificationPassed) {
+    log.error('❌ NETWORK ISOLATION VIOLATED: Test modified existing system rules!');
   }
 
   if (client) client.disconnect();
