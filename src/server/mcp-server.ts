@@ -924,6 +924,7 @@ export class ZettagridMcpServer {
                         diskSizeMB: { type: 'number', description: 'Boot disk size in MB. NOT applied by this call; recorded only. You must call update_vm_disk yourself after creation to actually set it.' },
                         storageProfileHref: { type: 'string', description: 'Storage policy href' },
                         storageProfileName: { type: 'string', description: 'Storage policy name' },
+                        userDataYaml: { type: 'string', description: 'Cloud-init YAML configuration (cloud-init templates only). Pass unencoded YAML starting with "#cloud-config". The MCP server validates it, base64-encodes it, and injects it as the "user-data" OVF property. Cloud-init will decode and apply it at boot.' },
                         networkConnections: {
                           type: 'array',
                           description: 'VM NIC connections to org VDC networks',
@@ -942,7 +943,7 @@ export class ZettagridMcpServer {
                         },
                         ovfProperties: {
                           type: 'array',
-                          description: 'OVF ProductSection properties for cloud-init (Ubuntu). SSH KEY USAGE: Set "public-keys" (hyphenated) to the raw SSH public key string (e.g., "ssh-ed25519 AAAAC3..."). Do NOT embed SSH keys in "user-data" — use the dedicated "public-keys" property. If using "user-data", it MUST be base64-encoded. Keys: hostname, instance-id, password, public-keys (for SSH — raw, not encoded), user-data (MUST be base64-encoded), seedfrom',
+                          description: 'OVF ProductSection properties for cloud-init (Ubuntu). RECOMMENDED: use "userDataYaml" field (at vmConfigs level, not here) to pass unencoded cloud-init YAML — server validates and base64-encodes it. MANUAL APPROACH (if not using userDataYaml): set "public-keys" to raw SSH key (e.g., "ssh-ed25519 AAAAC3..."), and "user-data" to base64-encoded YAML. Keys: hostname, instance-id, password, public-keys (raw SSH key), user-data (base64-encoded YAML), seedfrom',
                           items: {
                             type: 'object',
                             properties: {
@@ -1635,9 +1636,30 @@ export class ZettagridMcpServer {
             if (args?.networkConnections !== undefined) {
               configErrors.push('"networkConnections" was passed at the top level — it must be inside instantiationParams.vmConfigs[].networkConnections');
             }
+
+            // Handle user-data YAML encoding: users send unencoded YAML, server validates and base64-encodes
             const vmCfgs = (args?.instantiationParams as any)?.vmConfigs;
             if (Array.isArray(vmCfgs)) {
               vmCfgs.forEach((cfg: any, i: number) => {
+                // Process userDataYaml if provided (unencoded, user-friendly)
+                const userDataYaml = cfg?.userDataYaml;
+                if (userDataYaml && typeof userDataYaml === 'string') {
+                  // Validate YAML by checking if it starts with #cloud-config
+                  if (!userDataYaml.trim().startsWith('#cloud-config')) {
+                    configErrors.push(`instantiationParams.vmConfigs[${i}].userDataYaml: must start with "#cloud-config"`);
+                  } else {
+                    // Base64-encode and add to ovfProperties
+                    const encoded = Buffer.from(userDataYaml).toString('base64');
+                    cfg.ovfProperties = cfg.ovfProperties ?? [];
+                    // Remove any existing user-data property
+                    cfg.ovfProperties = (cfg.ovfProperties as any[]).filter((p: any) => p.key !== 'user-data');
+                    // Add base64-encoded user-data
+                    cfg.ovfProperties.push({ key: 'user-data', value: encoded });
+                    // Remove userDataYaml from config (it's been processed)
+                    delete cfg.userDataYaml;
+                  }
+                }
+
                 if (cfg?.name !== undefined && cfg?.vmName === undefined) {
                   configErrors.push(`instantiationParams.vmConfigs[${i}]: use "vmName" not "name" to set the VM display name`);
                 }
@@ -1668,7 +1690,7 @@ export class ZettagridMcpServer {
                   const userDataProp = ovfProps?.find(p => p.key === 'user-data');
                   // Check if user-data looks like unencoded YAML (starts with #cloud-config)
                   if (userDataProp?.value && typeof userDataProp.value === 'string' && userDataProp.value.startsWith('#')) {
-                    configErrors.push(`instantiationParams.vmConfigs[${i}]: OVF property "user-data" must be BASE64-encoded. Cloud-init reads the raw base64 value and decodes it. To inject SSH keys, use "public-keys" property instead (raw, not encoded).`);
+                    configErrors.push(`instantiationParams.vmConfigs[${i}]: OVF property "user-data" (in ovfProperties array) must be BASE64-encoded. Instead, use the "userDataYaml" field at vmConfigs level — the server will validate and encode it for you.`);
                   }
                 }
 
