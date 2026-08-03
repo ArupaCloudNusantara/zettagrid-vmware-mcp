@@ -1,0 +1,11 @@
+{
+  "vmIdOff": "urn:vcloud:vm:133c9913-20e1-404e-8ec3-0d4c11261f86",
+  "vmIdOn": "urn:vcloud:vm:5e8436b8-67cf-4e98-9be7-dfc49f55c88c",
+  "vappIdOn": "urn:vcloud:vapp:e094a727-0b37-4ede-b8f9-10c3be5a0f85",
+  "vappIdOff": "urn:vcloud:vapp:e7128feb-eb62-440c-a4ab-7a36b79eca27",
+  "vmIdTools": "urn:vcloud:vm:5e8436b8-67cf-4e98-9be7-dfc49f55c88c",
+  "_createdVapps": [
+    "urn:vcloud:vapp:e7128feb-eb62-440c-a4ab-7a36b79eca27",
+    "urn:vcloud:vapp:e094a727-0b37-4ede-b8f9-10c3be5a0f85"
+  ]
+}

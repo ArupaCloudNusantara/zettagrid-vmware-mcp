@@ -1159,8 +1159,8 @@ export class ZettagridClient {
     }
   }
 
-  /** Fetch detailed network configuration including IP ranges and gateway */
-  private async fetchNetworkDetailedConfig(networkHref: string, zoneId?: string): Promise<{ gateway?: string; subnetMask?: string; ipRanges?: Array<{ startAddress: string; endAddress: string }>; dhcp?: boolean; dhcpPools?: Array<{ startAddress: string; endAddress: string }>; usedIps?: string[] } | null> {
+  /** Fetch detailed network configuration including IP ranges, gateway, and allocated IPs from VM network connections */
+  private async fetchNetworkDetailedConfig(networkHref: string, vdcId?: string, networkName?: string, zoneId?: string): Promise<{ gateway?: string; subnetMask?: string; ipRanges?: Array<{ startAddress: string; endAddress: string }>; dhcp?: boolean; dhcpPools?: Array<{ startAddress: string; endAddress: string }>; usedIps?: string[] } | null> {
     try {
       const pathMatch = networkHref.match(/\/api(\/.+)/);
       const relativePath = pathMatch?.[1] ?? networkHref;
@@ -1205,10 +1205,10 @@ export class ZettagridClient {
 
       const dhcpFullyConfigured = dhcpEnabled && dhcpPools.length > 0;
 
-      // Extract allocated/used IPs from the network configuration
+      // Extract allocated/used IPs: first try from network XML, then fall back to querying VMs
       const usedIps: Set<string> = new Set();
 
-      // Check for IPs already allocated in StaticIpPool used ranges
+      // Try to extract from network XML first (some vCD installations may include this)
       const usedPoolRe = /<UsedIpAddress>([^<]+)<\/UsedIpAddress>/g;
       let usedMatch;
       while ((usedMatch = usedPoolRe.exec(xml)) !== null) {
@@ -1217,12 +1217,32 @@ export class ZettagridClient {
         }
       }
 
-      // Also check DHCP leases (allocated IPs)
-      const dhcpLeaseRe = /<DhcpLeaseInfo>\s*<IpAddress>([^<]+)<\/IpAddress>/g;
-      let leaseMatch;
-      while ((leaseMatch = dhcpLeaseRe.exec(xml)) !== null) {
-        if (leaseMatch[1]) {
-          usedIps.add(leaseMatch[1]);
+      // If XML extraction found nothing, query VMs to get allocated IPs
+      if (usedIps.size === 0 && vdcId && networkName) {
+        try {
+          const resolvedVdcId = await this.resolveVdcId(vdcId, zoneId);
+          const params: Record<string, string> = {
+            type: 'vm',
+            filter: `vdc==${resolvedVdcId}`
+          };
+          const vmListResponse = await this.makeRequest<string>({
+            method: 'GET',
+            url: '/query',
+            params
+          }, zoneId);
+
+          // Extract IPs from VM network connections for this specific network
+          const vmNetworkRe = /<NetworkConnection\s+network="([^"]*)"[^>]*>[\s\S]*?<IpAddress>([^<]+)<\/IpAddress>/g;
+          let vmMatch;
+          while ((vmMatch = vmNetworkRe.exec(vmListResponse.data as unknown as string)) !== null) {
+            const [, connNetwork, ipAddr] = vmMatch;
+            // Only add IPs from VMs connected to this specific network
+            if (connNetwork === networkName && ipAddr) {
+              usedIps.add(ipAddr);
+            }
+          }
+        } catch {
+          // If VM query fails, continue without used IPs data; this is not critical
         }
       }
 
@@ -1564,7 +1584,7 @@ export class ZettagridClient {
               const net = nets[i]!;
               if (net && net.linkType === 1) { // routed network
                 try {
-                  const netDetail = await this.fetchNetworkDetailedConfig(net.href, zoneId);
+                  const netDetail = await this.fetchNetworkDetailedConfig(net.href, vdcId, net.name, zoneId);
                   if (netDetail?.ipRanges?.length) {
                     const range = netDetail.ipRanges[0]!;
                     const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5, netDetail.usedIps);
@@ -1634,10 +1654,10 @@ export class ZettagridClient {
 
           if (isUbuntuModern) {
             // Fetch detailed network config to get IP ranges
-            const netDetail = await this.fetchNetworkDetailedConfig(net.href, zoneId);
+            const netDetail = await this.fetchNetworkDetailedConfig(net.href, vdcId, net.name, zoneId);
             if (netDetail?.ipRanges?.length) {
               const range = netDetail.ipRanges[0]!;
-              const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5);
+              const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5, netDetail.usedIps);
 
               if (suggestedIps.length > 0) {
                 return this.formatMcpResponse(
@@ -1713,10 +1733,10 @@ export class ZettagridClient {
               const net = netMap.get(nc.networkName);
               if (!net) continue;
 
-              const netDetail = await this.fetchNetworkDetailedConfig(net.href, zoneId);
+              const netDetail = await this.fetchNetworkDetailedConfig(net.href, vdcId, nc.networkName, zoneId);
               if (netDetail?.ipRanges?.length) {
                 const range = netDetail.ipRanges[0]!;
-                const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5);
+                const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5, netDetail.usedIps);
                 if (suggestedIps.length > 0) {
                   clarifications.push({
                     networkName: nc.networkName,
@@ -2018,10 +2038,10 @@ export class ZettagridClient {
             const suggestedIpsByNetwork: Record<string, { suggestedIps: string[]; gateway?: string; subnetMask?: string; dhcpAvailable?: boolean }> = {};
 
             for (const { nic, networkInfo } of ubuntuNicsNeedingIp) {
-              const netDetail = await this.fetchNetworkDetailedConfig(networkInfo.href, zoneId);
+              const netDetail = await this.fetchNetworkDetailedConfig(networkInfo.href, vdcId, nic.networkName, zoneId);
               if (netDetail?.ipRanges?.length) {
                 const range = netDetail.ipRanges[0]!;
-                const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5);
+                const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5, netDetail.usedIps);
                 suggestedIpsByNetwork[nic.networkName] = {
                   suggestedIps,
                   gateway: netDetail.gateway,
