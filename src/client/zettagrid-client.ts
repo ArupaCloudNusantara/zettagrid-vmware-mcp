@@ -1425,14 +1425,19 @@ export class ZettagridClient {
 
     // Determine if guest customization should be enabled: required for POOL/MANUAL modes (to apply IP)
     // DHCP mode doesn't need customization (IP assigned by DHCP server). Allow explicit override.
-    let needsCustomization = vmConfig.guestCustomization !== undefined ? !!vmConfig.guestCustomization : undefined;
-    if (needsCustomization === undefined && vmConfig.networkConnections?.length) {
+    let needsCustomization: boolean;
+    if (vmConfig.guestCustomization !== undefined) {
+      needsCustomization = !!vmConfig.guestCustomization;
+    } else if (vmConfig.networkConnections?.length) {
       // Auto-detect based on IP mode: POOL and MANUAL require customization to apply IP
       const hasPoolOrManual = vmConfig.networkConnections.some(nc => {
         const resolvedMode = nc.ipMode ?? 'POOL';
         return resolvedMode === 'POOL' || resolvedMode === 'MANUAL';
       });
       needsCustomization = hasPoolOrManual;
+    } else {
+      // Default: if no network connections or explicit setting, enable customization for safety
+      needsCustomization = true;
     }
 
     // Network connections
