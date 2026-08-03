@@ -1420,6 +1420,50 @@ export class ZettagridClient {
       .filter(a => a.innerNetwork !== a.containerNetwork && a.innerNetwork.toLowerCase() !== 'none');
   }
 
+  /** Generate netplan v2 configuration YAML for cloud-init to apply during boot.
+   *  Used for Ubuntu 24.04+ VMs with MANUAL IP mode instead of relying on vCD guest customization. */
+  private generateNetplanUserData(
+    nicIndex: number,
+    ipAddress: string,
+    gateway: string | undefined,
+    subnetMask: string | undefined
+  ): string {
+    // Calculate CIDR notation from subnet mask
+    let cidr = '/24'; // Default to /24
+    if (subnetMask) {
+      const parts = subnetMask.split('.');
+      if (parts.length === 4) {
+        const octets = parts.map(Number);
+        let bits = 0;
+        for (const octet of octets) {
+          let mask = octet;
+          while (mask > 0) {
+            bits += mask & 1;
+            mask >>= 1;
+          }
+        }
+        cidr = `/${bits}`;
+      }
+    }
+
+    const ethName = `eth${nicIndex}`;
+    const netplanYaml = `#cloud-config
+network:
+  version: 2
+  ethernets:
+    ${ethName}:
+      dhcp4: false
+      dhcp6: false
+      addresses:
+        - ${ipAddress}${cidr}
+${gateway ? `      gateway4: ${gateway}` : ''}
+      nameservers:
+        addresses: [8.8.8.8, 8.8.4.4]`;
+
+    // Encode as cloud-config for cloud-init
+    return netplanYaml;
+  }
+
   /** Build a complete SourcedItem XML block for one VM.
    *  networkAssignments: precomputed {innerNetwork, containerNetwork} pairs — innerNetwork is the
    *  template VM's existing NIC network name (e.g. "VM Network"), containerNetwork is the vApp
@@ -1434,13 +1478,22 @@ export class ZettagridClient {
     const hostnameFromOvf = vmConfig.ovfProperties?.find(p => p.key === 'hostname')?.value;
     const resolvedComputerName = vmConfig.guestCustomization?.computerName || hostnameFromOvf || vmName;
 
-    // Determine if guest customization should be enabled: required for POOL/MANUAL modes (to apply IP)
-    // DHCP mode doesn't need customization (IP assigned by DHCP server). Allow explicit override.
+    // For cloud-init templates (detected by presence of hostname/password/instance-id OVF properties),
+    // we disable vCD guest customization and rely on cloud-init's user-data instead.
+    // This is more reliable for Ubuntu 24.04+ which uses cloud-init.
+    const ovfPropKeys = vmConfig.ovfProperties?.map(p => p.key) ?? [];
+    const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+
+    // For cloud-init templates with MANUAL IP mode, user-data will handle network configuration.
+    // For non-cloud-init templates or DHCP mode, guest customization may still be needed.
     let needsCustomization: boolean;
-    if (vmConfig.guestCustomization !== undefined) {
+    if (isCloudInitTemplate) {
+      // Cloud-init templates: disable vCD guest customization, use user-data instead
+      needsCustomization = false;
+    } else if (vmConfig.guestCustomization !== undefined) {
       needsCustomization = !!vmConfig.guestCustomization;
     } else if (vmConfig.networkConnections?.length) {
-      // Auto-detect based on IP mode: POOL and MANUAL require customization to apply IP
+      // Auto-detect based on IP mode: POOL and MANUAL require customization to apply IP (for non-cloud-init templates)
       const hasPoolOrManual = vmConfig.networkConnections.some(nc => {
         const resolvedMode = nc.ipMode ?? 'POOL';
         return resolvedMode === 'POOL' || resolvedMode === 'MANUAL';
@@ -1669,7 +1722,7 @@ export class ZettagridClient {
           }
 
           const clarificationMessage = isUbuntuModern
-            ? `Ubuntu 24.04+ detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode (MANUAL with ipAddress from suggestedIps is RECOMMENDED, or DHCP if both DHCP service AND DHCP pools are configured on the network — avoid POOL for Ubuntu 24.04+). ⚠️ CRITICAL: DHCP requires BOTH (1) DHCP service enabled AND (2) DHCP pools configured. If either is missing, use MANUAL mode with one of the suggestedIps.`
+            ? `Ubuntu 24.04+ detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode and ipAddress (MANUAL with ipAddress from suggestedIps is RECOMMENDED — netplan will be auto-generated and injected via cloud-init user-data; or DHCP if both DHCP service AND DHCP pools are configured on the network). ⚠️ CRITICAL: DHCP requires BOTH (1) DHCP service enabled AND (2) DHCP pools configured. If either is missing, use MANUAL mode with one of the suggestedIps.`
             : `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options including DHCP availability are in data.availableNetworks. ⚠️ WARNING: DHCP mode requires BOTH active DHCP service AND configured DHCP pools on the network. If unsure, use MANUAL with a specific ipAddress.`;
 
           return this.formatMcpResponse(
@@ -1725,7 +1778,7 @@ export class ZettagridClient {
                   {
                     needsClarification: true,
                     network: net.name,
-                    reason: 'Ubuntu 24.04+ requires MANUAL IP mode instead of POOL (POOL mode interferes with cloud-init)',
+                    reason: 'Ubuntu 24.04+ uses cloud-init for network config. MANUAL IP mode with auto-generated netplan is RECOMMENDED.',
                     suggestedIps,
                     gateway: netDetail.gateway,
                     subnetMask: netDetail.subnetMask,
@@ -1733,7 +1786,7 @@ export class ZettagridClient {
                     options: [
                       {
                         ipMode: 'MANUAL',
-                        note: 'Recommended: select one of the suggested IPs or provide your own in the ipAddress field'
+                        note: 'Recommended: select one of the suggested IPs. Netplan YAML will be auto-generated and injected via cloud-init user-data.'
                       },
                       {
                         ipMode: 'DHCP',
@@ -1745,7 +1798,7 @@ export class ZettagridClient {
                   zone,
                   {
                     code: 'CLARIFICATION_REQUIRED',
-                    message: `Ubuntu 24.04+ detected. Please choose one of the suggested IP addresses for MANUAL mode configuration, or use DHCP mode instead of POOL.`,
+                    message: `Ubuntu 24.04+ detected. Choose a suggested IP for MANUAL mode — netplan will be auto-generated and injected via cloud-init, or select DHCP if available.`,
                   }
                 );
               }
@@ -1939,21 +1992,53 @@ export class ZettagridClient {
       // Build SourcedItem blocks — one per VM in the template
       let sourcedItemsXml = '';
       if (templateVms.length > 0 && resolvedVmConfigs.length > 0) {
-        sourcedItemsXml = templateVms.map(({ href, templateNetworks }, i) => {
+        const sourcedItems = await Promise.all(templateVms.map(async ({ href, templateNetworks }, i) => {
           const cfg = resolvedVmConfigs[i] ?? resolvedVmConfigs[0] ?? {};
           const fallbackName = templateVms.length === 1 ? vappName : `${vappName}-${i + 1}`;
           // Rename NIC targets to the template's own network name when networkNameMap has an
           // entry — the vApp-level NetworkConfig was auto-populated under that same name above,
           // so the NIC override already matches and no NetworkAssignment is needed.
-          const renamedCfg: VAppVmConfig = cfg.networkConnections?.length
+          let renamedCfg: VAppVmConfig = cfg.networkConnections?.length
             ? { ...cfg, networkConnections: cfg.networkConnections.map(nc => ({
                 ...nc,
                 networkName: networkNameMap.get(nc.networkName) ?? nc.networkName,
               })) }
             : cfg;
+
+          // For cloud-init templates with MANUAL IP mode, generate netplan user-data
+          const ovfPropKeys = renamedCfg.ovfProperties?.map(p => p.key) ?? [];
+          const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+          if (isCloudInitTemplate && renamedCfg.networkConnections?.length) {
+            const manualNic = renamedCfg.networkConnections.find(nc => nc.ipMode === 'MANUAL' && nc.ipAddress);
+            if (manualNic && manualNic.ipAddress) {
+              try {
+                // Fetch network details to get gateway and subnet for netplan
+                const nets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
+                const matchedNet = nets.find(n => n.name === manualNic.networkName);
+                if (matchedNet) {
+                  const netDetail = await this.fetchNetworkDetailedConfig(matchedNet.href, vdcId, manualNic.networkName, zoneId);
+                  const nicIndex = renamedCfg.networkConnections.indexOf(manualNic);
+                  const userDataYaml = this.generateNetplanUserData(nicIndex, manualNic.ipAddress, netDetail?.gateway, netDetail?.subnetMask);
+                  // Inject user-data as an OVF property (cloud-init will pick it up)
+                  const hasUserData = renamedCfg.ovfProperties?.some(p => p.key === 'user-data');
+                  if (!hasUserData) {
+                    renamedCfg = {
+                      ...renamedCfg,
+                      ovfProperties: [...(renamedCfg.ovfProperties ?? []), { key: 'user-data', value: userDataYaml }]
+                    };
+                  }
+                }
+              } catch (e) {
+                // If fetching network details fails, proceed without user-data
+                // (cloud-init will fall back to DHCP or other defaults)
+              }
+            }
+          }
+
           const networkAssignments = this.computeNetworkAssignments(templateNetworks, renamedCfg.networkConnections);
           return this.buildSourcedItemXml(href, renamedCfg, fallbackName, networkAssignments);
-        }).join('');
+        }));
+        sourcedItemsXml = sourcedItems.join('');
       }
 
       const createVAppPayload = `<?xml version="1.0" encoding="UTF-8"?>
@@ -2202,8 +2287,38 @@ export class ZettagridClient {
         }
       }
 
-      const networkAssignments = this.computeNetworkAssignments(firstTemplateNetworks, finalVmConfig.networkConnections);
-      const sourcedItemXml = this.buildSourcedItemXml(firstHref, finalVmConfig, vmName, networkAssignments);
+      // For cloud-init templates with MANUAL IP mode, generate netplan user-data
+      let configForXml = finalVmConfig;
+      const ovfPropKeys = configForXml.ovfProperties?.map(p => p.key) ?? [];
+      const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+      if (isCloudInitTemplate && configForXml.networkConnections?.length && vdcId) {
+        const manualNic = configForXml.networkConnections.find(nc => nc.ipMode === 'MANUAL' && nc.ipAddress);
+        if (manualNic && manualNic.ipAddress) {
+          try {
+            // Fetch network details to get gateway and subnet for netplan
+            const nets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
+            const matchedNet = nets.find(n => n.name === manualNic.networkName);
+            if (matchedNet) {
+              const netDetail = await this.fetchNetworkDetailedConfig(matchedNet.href, vdcId, manualNic.networkName, zoneId);
+              const nicIndex = configForXml.networkConnections.indexOf(manualNic);
+              const userDataYaml = this.generateNetplanUserData(nicIndex, manualNic.ipAddress, netDetail?.gateway, netDetail?.subnetMask);
+              // Inject user-data as an OVF property (cloud-init will pick it up)
+              const hasUserData = configForXml.ovfProperties?.some(p => p.key === 'user-data');
+              if (!hasUserData) {
+                configForXml = {
+                  ...configForXml,
+                  ovfProperties: [...(configForXml.ovfProperties ?? []), { key: 'user-data', value: userDataYaml }]
+                };
+              }
+            }
+          } catch (e) {
+            // If fetching network details fails, proceed without user-data
+          }
+        }
+      }
+
+      const networkAssignments = this.computeNetworkAssignments(firstTemplateNetworks, configForXml.networkConnections);
+      const sourcedItemXml = this.buildSourcedItemXml(firstHref, configForXml, vmName, networkAssignments);
 
       // name attribute is intentionally omitted — avoids renaming the parent vApp
       const payload = `<?xml version="1.0" encoding="UTF-8"?>
