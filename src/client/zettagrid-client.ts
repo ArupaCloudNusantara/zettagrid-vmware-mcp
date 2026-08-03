@@ -1532,8 +1532,8 @@ export class ZettagridClient {
           }
 
           const clarificationMessage = isUbuntuModern
-            ? `Ubuntu 24.04+ detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode (MANUAL with ipAddress from suggestedIps, or DHCP — avoid POOL for Ubuntu 24.04+).`
-            : `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options are in data.availableNetworks.`;
+            ? `Ubuntu 24.04+ detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode (MANUAL with ipAddress from suggestedIps preferred, or DHCP if DHCP service is confirmed active on the network — avoid POOL for Ubuntu 24.04+). ⚠️ WARNING: DHCP mode requires an active DHCP server on the network; if unsure, use MANUAL with one of the suggestedIps instead.`
+            : `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options are in data.availableNetworks. ⚠️ WARNING: If using DHCP mode, ensure the network has an active DHCP service; otherwise use MANUAL with a specific ipAddress.`;
 
           return this.formatMcpResponse(
             {
@@ -1560,7 +1560,7 @@ export class ZettagridClient {
                 poolStatus: { total: net.totalIps, available: 0 },
                 options: [
                   { ipMode: 'MANUAL', note: 'Provide a specific static IP in the ipAddress field of networkConnections' },
-                  { ipMode: 'DHCP', note: 'Request an IP via DHCP (requires DHCP service enabled on the network)' },
+                  { ipMode: 'DHCP', note: '⚠️ Request IP via DHCP — REQUIRES active DHCP server running on network. If uncertain, use MANUAL mode instead.' },
                 ],
                 hint: 'Or expand the static IP pool in VDC network settings, then retry (ipMode will default to POOL).',
               },
@@ -1682,19 +1682,19 @@ export class ZettagridClient {
                   options: [
                     {
                       ipMode: 'MANUAL',
-                      note: 'Recommended: select one of the suggested IPs or provide your own in the ipAddress field'
+                      note: '✅ RECOMMENDED: select one of the suggestedIps or provide your own static IP in the ipAddress field'
                     },
                     {
                       ipMode: 'DHCP',
-                      note: 'Alternative: use DHCP if enabled on the network'
+                      note: '⚠️ REQUIRES active DHCP server on network. If DHCP is not confirmed running, use MANUAL mode instead to avoid initialization failure.'
                     },
                   ],
-                  instructions: 'Call create_vapp again with networkConnections specifying ipMode: "MANUAL" with ipAddress (from suggestedIps) or "DHCP"',
+                  instructions: 'Call create_vapp again with networkConnections specifying ipMode: "MANUAL" with ipAddress (from suggestedIps) or "DHCP" only if DHCP is confirmed active',
                 },
                 zone,
                 {
                   code: 'CLARIFICATION_REQUIRED',
-                  message: `Ubuntu 24.04+ detected. Please specify ipMode for the network(s): choose MANUAL mode with one of the suggested IPs, or use DHCP instead of POOL.`,
+                  message: `Ubuntu 24.04+ detected. MANUAL mode with suggestedIps is recommended. Avoid POOL. Use DHCP only if DHCP server is confirmed running on the network.`,
                 }
               );
             }
@@ -1725,15 +1725,15 @@ export class ZettagridClient {
                 poolStatus: { total: e.totalIps, available: 0 },
                 options: [
                   { ipMode: 'MANUAL', note: 'Provide a specific static IP in the ipAddress field' },
-                  { ipMode: 'DHCP', note: 'Request an IP via DHCP' },
+                  { ipMode: 'DHCP', note: '⚠️ REQUIRES active DHCP server on network. Verify DHCP is running before choosing this mode.' },
                 ],
               })),
-              hint: 'Specify ipMode (MANUAL with ipAddress, or DHCP) for each affected NIC, or expand the static IP pool in VDC network settings and retry.',
+              hint: 'Specify ipMode (MANUAL with ipAddress is safer, or DHCP if DHCP server confirmed active) for each affected NIC, or expand the static IP pool in VDC network settings and retry.',
             },
             zone,
             {
               code: 'CLARIFICATION_REQUIRED',
-              message: `${exhausted.length} NIC(s) have no available IPs in their static pool: ${exhausted.map(e => `"${e.networkName}"`).join(', ')}. Specify ipMode: MANUAL (with ipAddress) or DHCP, or expand the IP pool first.`,
+              message: `${exhausted.length} NIC(s) have no available IPs in their static pool: ${exhausted.map(e => `"${e.networkName}"`).join(', ')}. Choose ipMode: MANUAL (with ipAddress) or DHCP (requires active DHCP server), or expand the IP pool first.`,
             }
           );
         }
@@ -2014,15 +2014,15 @@ export class ZettagridClient {
                   poolStatus: { total: e.totalIps, available: 0 },
                   options: [
                     { ipMode: 'MANUAL', note: 'Provide a specific static IP in the ipAddress field' },
-                    { ipMode: 'DHCP', note: 'Request an IP via DHCP' },
+                    { ipMode: 'DHCP', note: '⚠️ REQUIRES active DHCP server on network. Verify DHCP is running before choosing this mode.' },
                   ],
                 })),
-                hint: 'Specify ipMode (MANUAL with ipAddress, or DHCP), or expand the static IP pool in VDC network settings and retry.',
+                hint: 'Specify ipMode (MANUAL with ipAddress is safer, or DHCP if DHCP server confirmed active), or expand the static IP pool in VDC network settings and retry.',
               },
               zone,
               {
                 code: 'CLARIFICATION_REQUIRED',
-                message: `${exhausted.length} NIC(s) have no available IPs in their static pool: ${exhausted.map(e => `"${e.networkName}"`).join(', ')}. Specify ipMode: MANUAL (with ipAddress) or DHCP, or expand the pool first.`,
+                message: `${exhausted.length} NIC(s) have no available IPs in their static pool: ${exhausted.map(e => `"${e.networkName}"`).join(', ')}. Choose ipMode: MANUAL (with ipAddress) or DHCP (requires active DHCP server), or expand the pool first.`,
               }
             );
           }
