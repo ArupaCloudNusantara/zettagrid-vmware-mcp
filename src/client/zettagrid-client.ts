@@ -1423,6 +1423,18 @@ export class ZettagridClient {
     const hostnameFromOvf = vmConfig.ovfProperties?.find(p => p.key === 'hostname')?.value;
     const resolvedComputerName = vmConfig.guestCustomization?.computerName || hostnameFromOvf || vmName;
 
+    // Determine if guest customization should be enabled: required for POOL/DHCP modes (to apply IP)
+    // but disabled for MANUAL mode (to avoid interfering with cloud-init). Allow explicit override.
+    let needsCustomization = vmConfig.guestCustomization !== undefined ? !!vmConfig.guestCustomization : undefined;
+    if (needsCustomization === undefined && vmConfig.networkConnections?.length) {
+      // Auto-detect based on IP mode: POOL or DHCP requires customization to apply IP
+      const hasPoolOrDhcp = vmConfig.networkConnections.some(nc => {
+        const resolvedMode = nc.ipMode ?? 'POOL';
+        return resolvedMode === 'POOL' || resolvedMode === 'DHCP';
+      });
+      needsCustomization = hasPoolOrDhcp;
+    }
+
     // Network connections
     if (vmConfig.networkConnections?.length) {
       const primary = vmConfig.networkConnections.find(n => n.isPrimary !== false) ?? vmConfig.networkConnections[0]!;
@@ -1515,7 +1527,7 @@ export class ZettagridClient {
         <Source href="${vmHref}" />
         <VmGeneralParams>
             <Name>${vmName}</Name>
-            <NeedsCustomization>${vmConfig.guestCustomization ? 'true' : 'false'}</NeedsCustomization>
+            <NeedsCustomization>${needsCustomization ? 'true' : 'false'}</NeedsCustomization>
         </VmGeneralParams>${networkAssignmentsXml}${instParamsXml}${storageProfileXml}
     </SourcedItem>`;
   }
