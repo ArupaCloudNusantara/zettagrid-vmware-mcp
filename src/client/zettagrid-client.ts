@@ -1423,16 +1423,16 @@ export class ZettagridClient {
     const hostnameFromOvf = vmConfig.ovfProperties?.find(p => p.key === 'hostname')?.value;
     const resolvedComputerName = vmConfig.guestCustomization?.computerName || hostnameFromOvf || vmName;
 
-    // Determine if guest customization should be enabled: required for POOL/DHCP modes (to apply IP)
-    // but disabled for MANUAL mode (to avoid interfering with cloud-init). Allow explicit override.
+    // Determine if guest customization should be enabled: required for POOL/MANUAL modes (to apply IP)
+    // DHCP mode doesn't need customization (IP assigned by DHCP server). Allow explicit override.
     let needsCustomization = vmConfig.guestCustomization !== undefined ? !!vmConfig.guestCustomization : undefined;
     if (needsCustomization === undefined && vmConfig.networkConnections?.length) {
-      // Auto-detect based on IP mode: POOL or DHCP requires customization to apply IP
-      const hasPoolOrDhcp = vmConfig.networkConnections.some(nc => {
+      // Auto-detect based on IP mode: POOL and MANUAL require customization to apply IP
+      const hasPoolOrManual = vmConfig.networkConnections.some(nc => {
         const resolvedMode = nc.ipMode ?? 'POOL';
-        return resolvedMode === 'POOL' || resolvedMode === 'DHCP';
+        return resolvedMode === 'POOL' || resolvedMode === 'MANUAL';
       });
-      needsCustomization = hasPoolOrDhcp;
+      needsCustomization = hasPoolOrManual;
     }
 
     // Network connections
