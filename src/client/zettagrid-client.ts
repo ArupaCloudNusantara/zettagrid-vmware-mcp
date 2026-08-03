@@ -1564,6 +1564,16 @@ export class ZettagridClient {
             ? [{ guestCustomization: instantiationParams.guestCustomization }]
             : []);
 
+      // DEBUG: Log incoming vmConfigs for tracing
+      if (effectiveVmConfigs.length > 0) {
+        console.error('[createVApp-DEBUG] effectiveVmConfigs:', JSON.stringify({
+          count: effectiveVmConfigs.length,
+          vmNames: effectiveVmConfigs.map(c => c.vmName),
+          networkConnections: effectiveVmConfigs.map(c => c.networkConnections),
+          ovfProperties: effectiveVmConfigs.map(c => c.ovfProperties),
+        }, null, 2));
+      }
+
       // Lazy-fetch VDC networks once; reused by both auto-discovery and IP-mode resolution
       let cachedNets: Array<{ name: string; href: string; defaultGateway?: string; subnetPrefixLength?: number; availableIps: number; totalIps: number; linkType?: number }> | undefined;
       const getNets = async () => {
@@ -1892,12 +1902,24 @@ export class ZettagridClient {
 
       const vappInstParamsXml = this.buildVAppInstantiationParamsXml(resolvedParams);
 
+      // DEBUG: Log resolved state before building XML
+      console.error('[createVApp-DEBUG] Before XML build:', JSON.stringify({
+        resolvedVmConfigs: resolvedVmConfigs.map(c => ({
+          vmName: c.vmName,
+          networkConnections: c.networkConnections,
+          ovfProperties: c.ovfProperties?.map(p => ({ key: p.key, value: '***' })),
+        })),
+        networkNameMap: Array.from(networkNameMap.entries()),
+        resolvedParams_networkConfig: resolvedParams?.networkConfig,
+      }, null, 2));
+
       // Build SourcedItem blocks — one per VM in the template
       let sourcedItemsXml = '';
       if (templateVms.length > 0 && resolvedVmConfigs.length > 0) {
         sourcedItemsXml = templateVms.map(({ href, templateNetworks }, i) => {
           const cfg = resolvedVmConfigs[i] ?? resolvedVmConfigs[0] ?? {};
           const fallbackName = templateVms.length === 1 ? vappName : `${vappName}-${i + 1}`;
+          console.error(`[createVApp-DEBUG] VM ${i}: cfg.vmName="${cfg.vmName}", cfg.networkConnections:`, cfg.networkConnections);
           // Rename NIC targets to the template's own network name when networkNameMap has an
           // entry — the vApp-level NetworkConfig was auto-populated under that same name above,
           // so the NIC override already matches and no NetworkAssignment is needed.
@@ -1907,6 +1929,7 @@ export class ZettagridClient {
                 networkName: networkNameMap.get(nc.networkName) ?? nc.networkName,
               })) }
             : cfg;
+          console.error(`[createVApp-DEBUG] VM ${i} after rename: renamedCfg.networkConnections:`, renamedCfg.networkConnections);
           const networkAssignments = this.computeNetworkAssignments(templateNetworks, renamedCfg.networkConnections);
           return this.buildSourcedItemXml(href, renamedCfg, fallbackName, networkAssignments);
         }).join('');
@@ -1922,6 +1945,9 @@ export class ZettagridClient {
     <Source href="${templateId}" />${sourcedItemsXml}
     <AllEULAsAccepted>true</AllEULAsAccepted>
 </InstantiateVAppTemplateParams>`;
+
+      // DEBUG: Log the actual XML payload
+      console.error('[createVApp-DEBUG] Payload being sent to vCD:\n', createVAppPayload);
 
       const response = await this.makeRequest<string>({
         method: 'POST',
