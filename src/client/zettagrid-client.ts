@@ -1611,6 +1611,63 @@ export class ZettagridClient {
         const netMap = new Map(nets.map(n => [n.name, n]));
 
         const exhausted: Array<{ networkName: string; totalIps: number }> = [];
+        const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+
+        // Check if Ubuntu 24.04+ with unresolved ipMode - ask for clarification with IP suggestions
+        if (isUbuntuModern) {
+          const unboundNics = resolvedVmConfigs
+            .flatMap(c => c.networkConnections?.filter(nc => !nc.ipMode) ?? [])
+            .filter((nc, i, arr) => arr.findIndex(x => x.networkName === nc.networkName) === i); // unique networkNames
+
+          if (unboundNics.length > 0) {
+            const clarifications = [];
+            for (const nc of unboundNics) {
+              const net = netMap.get(nc.networkName);
+              if (!net) continue;
+
+              const netDetail = await this.fetchNetworkDetailedConfig(net.href, zoneId);
+              if (netDetail?.ipRanges?.length) {
+                const range = netDetail.ipRanges[0]!;
+                const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5);
+                if (suggestedIps.length > 0) {
+                  clarifications.push({
+                    networkName: nc.networkName,
+                    reason: 'Ubuntu 24.04+ requires MANUAL IP mode instead of POOL (POOL mode interferes with cloud-init)',
+                    suggestedIps,
+                    gateway: netDetail.gateway,
+                    subnetMask: netDetail.subnetMask,
+                    dhcpAvailable: netDetail.dhcp,
+                  });
+                }
+              }
+            }
+
+            if (clarifications.length > 0) {
+              return this.formatMcpResponse(
+                {
+                  needsClarification: true,
+                  networks: clarifications,
+                  options: [
+                    {
+                      ipMode: 'MANUAL',
+                      note: 'Recommended: select one of the suggested IPs or provide your own in the ipAddress field'
+                    },
+                    {
+                      ipMode: 'DHCP',
+                      note: 'Alternative: use DHCP if enabled on the network'
+                    },
+                  ],
+                  instructions: 'Call create_vapp again with networkConnections specifying ipMode: "MANUAL" with ipAddress (from suggestedIps) or "DHCP"',
+                },
+                zone,
+                {
+                  code: 'CLARIFICATION_REQUIRED',
+                  message: `Ubuntu 24.04+ detected. Please specify ipMode for the network(s): choose MANUAL mode with one of the suggested IPs, or use DHCP instead of POOL.`,
+                }
+              );
+            }
+          }
+        }
 
         const finalVmConfigs = resolvedVmConfigs.map(c => ({
           ...c,
@@ -1618,7 +1675,9 @@ export class ZettagridClient {
             if (nc.ipMode) return nc;
             const info = netMap.get(nc.networkName);
             if (info && info.availableIps > 0) {
-              return { ...nc, ipMode: 'POOL' as const };
+              // Ubuntu 24.04+ should default to DHCP instead of POOL when IP mode is unspecified
+              const ipMode = isUbuntuModern ? ('DHCP' as const) : ('POOL' as const);
+              return { ...nc, ipMode };
             }
             exhausted.push({ networkName: nc.networkName, totalIps: info?.totalIps ?? 0 });
             return nc;
