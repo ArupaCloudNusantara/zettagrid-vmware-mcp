@@ -1464,6 +1464,62 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     return netplanYaml;
   }
 
+  /** Enable guest customization on an existing VM (POST-deployment).
+   *  For non-cloud-init templates with POOL/MANUAL IP modes, we need to enable guest customization
+   *  after the VM is created, since vCD may not respect instantiation-time settings for Linux VMs. */
+  private async enableVmGuestCustomization(vmHref: string, computerName: string, zoneId?: string): Promise<void> {
+    try {
+      const vmId = vmUuid(vmHref);
+
+      // Fetch current guest customization section
+      const response = await this.makeRequest<string>({
+        method: 'GET',
+        url: `/vApp/vm-${vmId}/guestCustomizationSection`,
+      }, zoneId);
+
+      // Parse the current section
+      let guestCustomizationXml = response.data as unknown as string;
+
+      // Update or inject <Enabled>true</Enabled>
+      if (guestCustomizationXml.includes('<Enabled>')) {
+        guestCustomizationXml = guestCustomizationXml.replace(
+          /<Enabled>.*?<\/Enabled>/,
+          '<Enabled>true</Enabled>'
+        );
+      } else {
+        // Inject <Enabled>true</Enabled> after <ovf:Info>
+        guestCustomizationXml = guestCustomizationXml.replace(
+          /<ovf:Info[^>]*>.*?<\/ovf:Info>/,
+          m => m + '\n            <Enabled>true</Enabled>'
+        );
+      }
+
+      // Ensure ComputerName is set
+      if (!guestCustomizationXml.includes('<ComputerName>')) {
+        guestCustomizationXml = guestCustomizationXml.replace(
+          /<\/GuestCustomizationSection>/,
+          `            <ComputerName>${xmlEscape(computerName)}</ComputerName>\n        </GuestCustomizationSection>`
+        );
+      } else {
+        guestCustomizationXml = guestCustomizationXml.replace(
+          /<ComputerName>.*?<\/ComputerName>/,
+          `<ComputerName>${xmlEscape(computerName)}</ComputerName>`
+        );
+      }
+
+      // PUT the updated section back
+      await this.makeRequest({
+        method: 'PUT',
+        url: `/vApp/vm-${vmId}/guestCustomizationSection`,
+        data: guestCustomizationXml,
+        headers: { 'Content-Type': 'application/vnd.vmware.vcloud.guestCustomizationSection+xml' }
+      }, zoneId);
+    } catch (e) {
+      // Log but don't fail the overall operation if guest customization update fails
+      console.error(`Failed to enable guest customization on VM: ${vmHref}`, e);
+    }
+  }
+
   /** Build a complete SourcedItem XML block for one VM.
    *  networkAssignments: precomputed {innerNetwork, containerNetwork} pairs — innerNetwork is the
    *  template VM's existing NIC network name (e.g. "VM Network"), containerNetwork is the vApp
@@ -2072,6 +2128,25 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       const taskStatus = (vappXml.match(/<Task\b[^>]*status="([^"]+)"/) || [])[1] || '';
       // Expose bare taskId at top level so callers can poll with get_task without parsing the href
       const taskId   = taskHref.split('/task/')[1] || '';
+
+      // For non-cloud-init templates with POOL/MANUAL IP mode, enable guest customization post-deployment
+      // This works around vCD not respecting instantiation-time NeedsCustomization for Linux VMs
+      if (vmHref && resolvedVmConfigs.length > 0) {
+        const cfg = resolvedVmConfigs[0];
+        const ovfPropKeys = cfg?.ovfProperties?.map(p => p.key) ?? [];
+        const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+        const hasPoolOrManualMode = cfg?.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
+
+        if (!isCloudInitTemplate && hasPoolOrManualMode) {
+          // Enable guest customization for non-cloud-init templates that need IP configuration
+          const vmName = cfg?.vmName || (templateVms.length === 1 ? vappName : `${vappName}-1`);
+          // Fire async (don't await) so we return immediately; vCD will accept the update while task runs
+          this.enableVmGuestCustomization(vmHref, vmName, zoneId).catch(e => {
+            console.error('Post-deployment guest customization update failed (continuing anyway)', e);
+          });
+        }
+      }
+
       return this.formatMcpResponse(
         { vappId, vmId, vappName: resolvedName, vappHref, vmHref,
           taskId,
@@ -2334,6 +2409,22 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       }, zoneId);
 
       const task = parseTaskResponse(response.data as unknown as string);
+
+      // For non-cloud-init templates with POOL/MANUAL IP mode, enable guest customization post-deployment
+      if (configForXml && firstHref) {
+        const ovfPropKeys = configForXml.ovfProperties?.map(p => p.key) ?? [];
+        const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+        const hasPoolOrManualMode = configForXml.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
+
+        if (!isCloudInitTemplate && hasPoolOrManualMode) {
+          // Enable guest customization for non-cloud-init templates that need IP configuration
+          // Fire async (don't await) so we return immediately
+          this.enableVmGuestCustomization(firstHref, vmName, zoneId).catch(e => {
+            console.error('Post-deployment guest customization update failed (continuing anyway)', e);
+          });
+        }
+      }
+
       return this.formatMcpResponse(
         {
           ...task, vappId, vmName,
