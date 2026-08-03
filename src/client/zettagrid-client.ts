@@ -2679,11 +2679,32 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     firewallRule: Partial<FirewallRule>,
     zoneId?: string
   ): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
       edgeGatewayId = toGatewayUrn(edgeGatewayId);
-      const portProfiles = firewallRule.portProfiles ?? (firewallRule as any).portProfiles as string[] | undefined;
+      let portProfiles = firewallRule.portProfiles ?? (firewallRule as any).portProfiles as string[] | undefined;
       const portProfileId = (firewallRule as any).portProfileId as string | undefined;
-      const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId ? [portProfileId] : [])];
+      const destPortRange = (firewallRule as any).destinationPortRange as string | undefined;
+
+      // Auto-create port profiles from destination port range if specified without profiles
+      if ((destPortRange || portProfileId) && !portProfiles) {
+        portProfiles = [];
+        if (portProfileId) {
+          portProfiles.push(portProfileId);
+        } else if (destPortRange && destPortRange !== 'Any') {
+          // Parse port range (e.g., "1022" or "1022-1025")
+          const portStr = destPortRange.split(',')[0]?.trim() || ''; // Take first port if range
+          if (portStr && /^\d+(-\d+)?$/.test(portStr)) {
+            const port = portStr.split('-')[0] || ''; // Use start of range
+            if (port) {
+              const profileId = await this.getOrCreatePortProfile(port, 'TCP', undefined, zoneId);
+              portProfiles.push(profileId);
+            }
+          }
+        }
+      }
+
+      const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId && !portProfiles ? [portProfileId] : [])];
       const payload: Record<string, any> = {
         name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
         enabled: firewallRule.isEnabled !== false,
@@ -2692,7 +2713,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         direction: 'IN_OUT',
         sourceFirewallGroups: (firewallRule.sourceFirewallGroups ?? []).map(id => ({ id })),
         destinationFirewallGroups: (firewallRule.destinationFirewallGroups ?? []).map(id => ({ id })),
-        applicationPortProfiles: allPortProfiles.map(p => ({ id: p })),
+        ...(allPortProfiles.length > 0 && { applicationPortProfiles: allPortProfiles.map(p => ({ id: p })) }),
         description: firewallRule.description || '',
         logging: firewallRule.enableLogging || false,
       };
@@ -2713,9 +2734,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         ruleName: payload.name,
         message: 'Firewall rule creation accepted (202). Use list_firewall_rules to confirm the rule and retrieve its ID.',
       };
-      return this.formatMcpResponse(result, zoneId || this.zoneManager.getConfig().defaultZone);
+      return this.formatMcpResponse(result, zone);
     } catch (error) {
-      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({}, zone, {
         code: 'CREATE_FIREWALL_RULE_ERROR',
         message: error instanceof Error ? error.message : 'Failed to create firewall rule',
         details: error,
@@ -3325,6 +3346,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     },
     zoneId?: string
   ): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
       const gwUrn = toGatewayUrn(edgeGatewayId);
       const payload: Record<string, any> = {
@@ -3337,12 +3359,38 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         firewallMatch: natRule.firewallMatch || 'MATCH_INTERNAL_ADDRESS',
       };
       if (natRule.externalPort) payload.dnatExternalPort = natRule.externalPort;
-      if (natRule.applicationPortProfileId) {
+
+      let profileId = natRule.applicationPortProfileId;
+      let profileName = natRule.applicationPortProfileName;
+
+      // Auto-lookup or create port profile if user specified a port number or name
+      if (natRule.internalPort && !profileId) {
+        // User specified internalPort number — auto-create/lookup "SSH" or CUSTOM-TCP-{port}
+        if (natRule.internalPort === '22') {
+          // Use standard SSH profile
+          const sshProfile = await this.lookupPortProfile('SSH', zoneId);
+          profileId = sshProfile || await this.getOrCreatePortProfile(natRule.internalPort, 'TCP', undefined, zoneId);
+        } else {
+          // Create custom profile for this port
+          profileId = await this.getOrCreatePortProfile(natRule.internalPort, 'TCP', undefined, zoneId);
+        }
+        profileName = profileId.split(':').pop();
+      } else if (natRule.applicationPortProfileName && !profileId) {
+        // User specified profile name — lookup
+        profileId = await this.lookupPortProfile(natRule.applicationPortProfileName, zoneId);
+        if (!profileId) {
+          throw new Error(`Port profile '${natRule.applicationPortProfileName}' not found. Create it first or specify internalPort number.`);
+        }
+        profileName = natRule.applicationPortProfileName;
+      }
+
+      if (profileId) {
         payload.applicationPortProfile = {
-          id: natRule.applicationPortProfileId,
-          name: natRule.applicationPortProfileName || natRule.applicationPortProfileId.split(':').pop() || '',
+          id: profileId,
+          name: profileName || profileId.split(':').pop() || '',
         };
       }
+
       const data = await this.makeCloudApiRequest<any>(
         'POST', `/edgeGateways/${gwUrn}/nat/rules`, zoneId, payload
       );
@@ -3352,9 +3400,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         type: natRule.type,
         message: 'NAT rule creation accepted. Use list_nat_rules to confirm the rule and retrieve its ID.',
       };
-      return this.formatMcpResponse(result, zoneId || this.zoneManager.getConfig().defaultZone);
+      return this.formatMcpResponse(result, zone);
     } catch (error) {
-      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({}, zone, {
         code: 'CREATE_NAT_RULE_ERROR',
         message: error instanceof Error ? error.message : 'Failed to create NAT rule',
         details: error,
@@ -4435,6 +4483,116 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         details: error,
       });
     }
+  }
+
+  /**
+   * Helper: Lookup or auto-create a port profile by port number.
+   * If a profile for the port already exists, returns its URN.
+   * Otherwise, creates CUSTOM-{PROTOCOL}-{PORT} and returns the URN.
+   * Useful for seamless NAT/firewall rule creation without manual profile management.
+   */
+  async getOrCreatePortProfile(
+    port: string,
+    protocol: string = 'TCP',
+    vdcId?: string,
+    zoneId?: string
+  ): Promise<string> {
+    const profileName = `CUSTOM-${protocol.toUpperCase()}-${port}`;
+
+    // List existing profiles to see if one matches
+    const listResp = await this.makeCloudApiRequest<{ items: Array<{ name: string; id: string }> }>(
+      'GET',
+      '/applicationPortProfiles',
+      zoneId
+    );
+
+    const existing = listResp?.items?.find(
+      p => p.name === profileName || (p.name.includes(`-${port}`) && p.name.includes(protocol.toUpperCase()))
+    );
+
+    if (existing) {
+      return existing.id;
+    }
+
+    // Profile doesn't exist — create it
+    // Get the VDC ID if not provided
+    if (!vdcId) {
+      const vdcResp = await this.makeRequest<string>(
+        { method: 'GET', url: '/admin/extension/virtualDatacenters' },
+        zoneId
+      );
+      const vdcMatch = /<VirtualDataCenter[^>]*href=".*\/vdc\/([a-f0-9\-]+)"/.exec(vdcResp.data);
+      vdcId = vdcMatch?.[1] || '';
+    }
+
+    if (!vdcId) {
+      throw new Error('Could not determine VDC ID for port profile creation');
+    }
+
+    const vdcUrn = vdcId.startsWith('urn:vcloud:') ? vdcId : `urn:vcloud:vdc:${vdcId}`;
+
+    // Create the profile
+    const orgListResp = await this.makeRequest<string>(
+      { method: 'GET', url: '/query', params: { type: 'organization' } },
+      zoneId
+    );
+    const orgs = parseOrganizationRecords(orgListResp.data);
+    const rawOrgId = orgs[0]?.id || '';
+    const orgUrn = rawOrgId.startsWith('urn:vcloud:org:') ? rawOrgId : `urn:vcloud:org:${rawOrgId}`;
+
+    const createPayload = {
+      name: profileName,
+      scope: 'TENANT',
+      contextEntityId: vdcUrn,
+      orgRef: { id: orgUrn },
+      applicationPorts: [
+        {
+          protocol: protocol.toUpperCase(),
+          destinationPorts: [port],
+        },
+      ],
+    };
+
+    await this.makeCloudApiRequest<any>(
+      'POST',
+      '/applicationPortProfiles',
+      zoneId,
+      createPayload
+    );
+
+    // After creation, list again to get the URN (vCD doesn't return it on POST)
+    const listResp2 = await this.makeCloudApiRequest<{ items: Array<{ name: string; id: string }> }>(
+      'GET',
+      '/applicationPortProfiles',
+      zoneId
+    );
+
+    const created = listResp2?.items?.find(p => p.name === profileName);
+    if (!created) {
+      throw new Error(`Failed to find created port profile ${profileName}`);
+    }
+
+    return created.id;
+  }
+
+  /**
+   * Lookup a port profile by name or port number.
+   * Returns the profile URN if found, undefined otherwise.
+   */
+  async lookupPortProfile(nameOrPort: string, zoneId?: string): Promise<string | undefined> {
+    const listResp = await this.makeCloudApiRequest<{ items: Array<{ name: string; id: string }> }>(
+      'GET',
+      '/applicationPortProfiles',
+      zoneId
+    );
+
+    // Try exact name match first
+    let match = listResp?.items?.find(p => p.name === nameOrPort);
+    if (match) return match.id;
+
+    // Try port number match (e.g., "1022" matches "CUSTOM-SSH-1022")
+    match = listResp?.items?.find(p => p.name.includes(`-${nameOrPort}`) || p.name.endsWith(nameOrPort));
+    return match?.id;
   }
 
   /**

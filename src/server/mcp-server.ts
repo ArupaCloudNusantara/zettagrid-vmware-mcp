@@ -411,7 +411,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_firewall_rule',
-          description: 'Create an NSX-T firewall rule on an edge gateway. Required fields: edgeGatewayId, name, policy ("allow" or "drop" — NOT "action"). For port-based matching pass portProfiles (array of URNs) — NOT portProfileIds. Typical DNAT companion: direction=IN, policy=allow, portProfiles=[external-port-profile-URN]. Use list_application_port_profiles to find URNs.',
+          description: 'Create an NSX-T firewall rule on an edge gateway. Required fields: edgeGatewayId, name, policy ("allow" or "drop"). **SIMPLIFIED**: Pass destinationPortRange (e.g. "1022" or "8080-8090") and the tool auto-creates the application port profile if needed — no manual profile creation. Alternatively, pass portProfiles with URNs or profile names for manual control. For DNAT rules, use sourceIp (source public IP) and destinationFirewallGroups (destination gateway group). Example: sourceIp=119.235.223.219, destinationFirewallGroups=[gateway-group-URN], destinationPortRange=1022, policy=allow automatically creates CUSTOM-TCP-1022 and allows traffic from your public IP to that port.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -464,11 +464,11 @@ export class ZettagridMcpServer {
               portProfiles: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Application port profile URNs to match — use THIS (NOT portProfileIds). E.g. ["urn:vcloud:applicationPortProfile:xxx"]. Omit to match any port.'
+                description: 'Application port profile URNs or names to match. Can pass URNs (e.g. "urn:vcloud:applicationPortProfile:xxx") or profile names (e.g. "SSH", "HTTP", "CUSTOM-SSH-1022", "1022"). Omit to match any port. Tool auto-creates profiles from port numbers if not found (e.g., passing ["1022"] auto-creates CUSTOM-TCP-1022).'
               },
               portProfileId: {
                 type: 'string',
-                description: 'Single application port profile URN (alternative to portProfiles array for a single profile)'
+                description: 'Single application port profile URN or name (alternative to portProfiles array for a single profile). Supports both URNs and names for auto-lookup/creation.'
               },
               sourceFirewallGroups: {
                 type: 'array',
@@ -585,7 +585,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_nat_rule',
-          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP. For DNAT: set firewallMatch to MATCH_EXTERNAL_ADDRESS (recommended — matches traffic on the external/public port before NAT; the default MATCH_INTERNAL_ADDRESS matches after NAT and typically mismatches firewall rules keyed on the external port). The applicationPortProfileId defines the internal destination protocol/port; dnatExternalPort overrides the incoming external port.',
+          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP. **SIMPLIFIED**: Pass just internalPort (e.g. "22" for SSH) and the tool auto-creates the application port profile if needed. Or pass applicationPortProfileName to use an existing profile by name. For DNAT: set firewallMatch to MATCH_EXTERNAL_ADDRESS (recommended — matches traffic on the external/public port before NAT; the default MATCH_INTERNAL_ADDRESS matches after NAT and typically mismatches firewall rules keyed on the external port). The applicationPortProfile now auto-creates and manages protocol definitions — no manual profile creation required.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -595,11 +595,11 @@ export class ZettagridMcpServer {
               externalAddresses: { type: 'string', description: 'Public/external IP address (e.g. 203.0.113.1)' },
               internalAddresses: { type: 'string', description: 'Private/internal IP address or subnet (e.g. 192.168.1.10)' },
               externalPort: { type: 'string', description: 'External port number or range (e.g. "80" or "8080-8090"), omit for any' },
-              internalPort: { type: 'string', description: 'Internal port number (e.g. "80"), omit to match external' },
+              internalPort: { type: 'string', description: 'Internal destination port number (e.g. "22" for SSH). When specified, auto-creates CUSTOM-TCP-{port} application port profile if it doesn\'t exist — no manual profile creation needed. For SSH use port "22", for HTTP use "80", for HTTPS use "443".' },
               description: { type: 'string', description: 'Optional description' },
               enabled: { type: 'boolean', description: 'Enable rule immediately (default true)' },
-              applicationPortProfileId: { type: 'string', description: 'Application port profile URN for protocol matching (optional)' },
-              applicationPortProfileName: { type: 'string', description: 'Display name for the port profile (optional)' },
+              applicationPortProfileId: { type: 'string', description: 'Application port profile URN (optional — use internalPort instead for auto-creation)' },
+              applicationPortProfileName: { type: 'string', description: 'Application port profile name to lookup and use (e.g. "SSH", "HTTP", "CUSTOM-SSH-1022"). Tool looks up the profile by name.' },
               firewallMatch: { type: 'string', enum: ['MATCH_INTERNAL_ADDRESS', 'MATCH_EXTERNAL_ADDRESS', 'BYPASS'], description: 'Firewall match mode (default: MATCH_INTERNAL_ADDRESS)' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
