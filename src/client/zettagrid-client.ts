@@ -1160,7 +1160,7 @@ export class ZettagridClient {
   }
 
   /** Fetch detailed network configuration including IP ranges and gateway */
-  private async fetchNetworkDetailedConfig(networkHref: string, zoneId?: string): Promise<{ gateway?: string; subnetMask?: string; ipRanges?: Array<{ startAddress: string; endAddress: string }>; dhcp?: boolean } | null> {
+  private async fetchNetworkDetailedConfig(networkHref: string, zoneId?: string): Promise<{ gateway?: string; subnetMask?: string; ipRanges?: Array<{ startAddress: string; endAddress: string }>; dhcp?: boolean; dhcpPools?: Array<{ startAddress: string; endAddress: string }> } | null> {
     try {
       const pathMatch = networkHref.match(/\/api(\/.+)/);
       const relativePath = pathMatch?.[1] ?? networkHref;
@@ -1187,9 +1187,31 @@ export class ZettagridClient {
 
       // Check if DHCP is enabled
       const dhcpMatch = xml.match(/<DhcpService>\s*<IsEnabled>([^<]+)<\/IsEnabled>/);
-      const dhcp = dhcpMatch?.[1] === 'true';
+      const dhcpEnabled = dhcpMatch?.[1] === 'true';
 
-      return { gateway, subnetMask, ipRanges: ipRanges.length > 0 ? ipRanges : undefined, dhcp };
+      // Extract DHCP pools (DhcpPools section contains IP ranges available for DHCP assignment)
+      const dhcpPools: Array<{ startAddress: string; endAddress: string }> = [];
+      const dhcpPoolsMatch = xml.match(/<DhcpPools>([\s\S]*?)<\/DhcpPools>/);
+      if (dhcpPoolsMatch?.[1]) {
+        const dhcpPoolsXml = dhcpPoolsMatch[1];
+        const dhcpRangeRe = /<IpRange>\s*<StartAddress>([^<]+)<\/StartAddress>\s*<EndAddress>([^<]+)<\/EndAddress>\s*<\/IpRange>/g;
+        let dhcpM;
+        while ((dhcpM = dhcpRangeRe.exec(dhcpPoolsXml)) !== null) {
+          if (dhcpM[1] && dhcpM[2]) {
+            dhcpPools.push({ startAddress: dhcpM[1], endAddress: dhcpM[2] });
+          }
+        }
+      }
+
+      const dhcpFullyConfigured = dhcpEnabled && dhcpPools.length > 0;
+
+      return {
+        gateway,
+        subnetMask,
+        ipRanges: ipRanges.length > 0 ? ipRanges : undefined,
+        dhcp: dhcpFullyConfigured,
+        dhcpPools: dhcpPools.length > 0 ? dhcpPools : undefined
+      };
     } catch (e) {
       return null;
     }
@@ -1506,11 +1528,11 @@ export class ZettagridClient {
             totalIps: n.totalIps,
             gateway: n.defaultGateway,
             prefix: n.subnetPrefixLength,
-            // For Ubuntu 24.04+, suggest DHCP instead of POOL; otherwise suggest POOL if IPs available
-            suggestedIpMode: isUbuntuModern ? 'DHCP' : (n.availableIps > 0 ? 'POOL' : 'DHCP'),
+            // For Ubuntu 24.04+, suggest DHCP only if available; otherwise MANUAL; fall back to DHCP for other templates if IPs available
+            suggestedIpMode: isUbuntuModern ? 'MANUAL' : (n.availableIps > 0 ? 'POOL' : 'DHCP'),
           }));
 
-          // If Ubuntu 24.04+, add IP suggestions for routed networks
+          // If Ubuntu 24.04+, add IP suggestions for routed networks and include DHCP pool info
           if (isUbuntuModern) {
             for (let i = 0; i < networkDataForResponse.length; i++) {
               const net = nets[i]!;
@@ -1524,6 +1546,14 @@ export class ZettagridClient {
                       networkDataForResponse[i].suggestedIps = suggestedIps;
                     }
                   }
+                  // Include DHCP pool info
+                  if (netDetail?.dhcpPools?.length) {
+                    networkDataForResponse[i].dhcpPoolCount = netDetail.dhcpPools.length;
+                    networkDataForResponse[i].dhcpAvailable = true;
+                  } else {
+                    networkDataForResponse[i].dhcpAvailable = false;
+                    networkDataForResponse[i].dhcpWarning = 'DHCP service or DHCP pools not configured on this network';
+                  }
                 } catch {
                   // Continue if network details fail
                 }
@@ -1532,8 +1562,8 @@ export class ZettagridClient {
           }
 
           const clarificationMessage = isUbuntuModern
-            ? `Ubuntu 24.04+ detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode (MANUAL with ipAddress from suggestedIps preferred, or DHCP if DHCP service is confirmed active on the network — avoid POOL for Ubuntu 24.04+). ⚠️ WARNING: DHCP mode requires an active DHCP server on the network; if unsure, use MANUAL with one of the suggestedIps instead.`
-            : `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options are in data.availableNetworks. ⚠️ WARNING: If using DHCP mode, ensure the network has an active DHCP service; otherwise use MANUAL with a specific ipAddress.`;
+            ? `Ubuntu 24.04+ detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode (MANUAL with ipAddress from suggestedIps is RECOMMENDED, or DHCP if both DHCP service AND DHCP pools are configured on the network — avoid POOL for Ubuntu 24.04+). ⚠️ CRITICAL: DHCP requires BOTH (1) DHCP service enabled AND (2) DHCP pools configured. If either is missing, use MANUAL mode with one of the suggestedIps.`
+            : `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options including DHCP availability are in data.availableNetworks. ⚠️ WARNING: DHCP mode requires BOTH active DHCP service AND configured DHCP pools on the network. If unsure, use MANUAL with a specific ipAddress.`;
 
           return this.formatMcpResponse(
             {
@@ -1686,7 +1716,7 @@ export class ZettagridClient {
                     },
                     {
                       ipMode: 'DHCP',
-                      note: '⚠️ REQUIRES active DHCP server on network. If DHCP is not confirmed running, use MANUAL mode instead to avoid initialization failure.'
+                      note: '⚠️ CRITICAL: REQUIRES BOTH (1) DHCP service enabled AND (2) DHCP pools configured. If either is missing, VM initialization will fail. Use MANUAL with suggestedIps instead if unsure.'
                     },
                   ],
                   instructions: 'Call create_vapp again with networkConnections specifying ipMode: "MANUAL" with ipAddress (from suggestedIps) or "DHCP" only if DHCP is confirmed active',
@@ -1725,7 +1755,7 @@ export class ZettagridClient {
                 poolStatus: { total: e.totalIps, available: 0 },
                 options: [
                   { ipMode: 'MANUAL', note: 'Provide a specific static IP in the ipAddress field' },
-                  { ipMode: 'DHCP', note: '⚠️ REQUIRES active DHCP server on network. Verify DHCP is running before choosing this mode.' },
+                  { ipMode: 'DHCP', note: '⚠️ REQUIRES BOTH DHCP service enabled AND DHCP pools configured on network. Check network settings before choosing this mode.' },
                 ],
               })),
               hint: 'Specify ipMode (MANUAL with ipAddress is safer, or DHCP if DHCP server confirmed active) for each affected NIC, or expand the static IP pool in VDC network settings and retry.',
@@ -2014,7 +2044,7 @@ export class ZettagridClient {
                   poolStatus: { total: e.totalIps, available: 0 },
                   options: [
                     { ipMode: 'MANUAL', note: 'Provide a specific static IP in the ipAddress field' },
-                    { ipMode: 'DHCP', note: '⚠️ REQUIRES active DHCP server on network. Verify DHCP is running before choosing this mode.' },
+                    { ipMode: 'DHCP', note: '⚠️ REQUIRES BOTH DHCP service enabled AND DHCP pools configured on network. Check network settings before choosing this mode.' },
                   ],
                 })),
                 hint: 'Specify ipMode (MANUAL with ipAddress is safer, or DHCP if DHCP server confirmed active), or expand the static IP pool in VDC network settings and retry.',
