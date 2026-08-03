@@ -2686,11 +2686,42 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       const portProfileId = (firewallRule as any).portProfileId as string | undefined;
       const destPortRange = (firewallRule as any).destinationPortRange as string | undefined;
 
-      // Auto-create port profiles from destination port range if specified without profiles
-      if ((destPortRange || portProfileId) && !portProfiles) {
+      // Resolve any non-URN entries (bare port numbers or profile names) to real URNs.
+      // Without this, passing e.g. portProfiles: ["1022"] or ["SSH"] silently sent the
+      // literal string as the id, which vCD either rejects or ignores.
+      const resolvePortProfileToken = async (token: string): Promise<string> => {
+        if (token.startsWith('urn:vcloud:')) return token;
+        if (/^\d+$/.test(token)) {
+          // Bare port number — reuse an existing profile or auto-create one
+          const found = await this.lookupPortProfile(token, zoneId);
+          return found || await this.getOrCreatePortProfile(token, 'TCP', undefined, zoneId);
+        }
+        // Named profile (e.g. "SSH", "CUSTOM-SSH-1022") — must already exist
+        const found = await this.lookupPortProfile(token, zoneId);
+        if (!found) {
+          throw new Error(
+            `Application port profile '${token}' not found. Use list_application_port_profiles to check available names, or pass a bare port number to auto-create one.`
+          );
+        }
+        return found;
+      };
+
+      if (portProfiles && portProfiles.length > 0) {
+        const resolved: string[] = [];
+        for (const p of portProfiles) resolved.push(await resolvePortProfileToken(p));
+        portProfiles = resolved;
+      }
+
+      let resolvedPortProfileId = portProfileId;
+      if (portProfileId) {
+        resolvedPortProfileId = await resolvePortProfileToken(portProfileId);
+      }
+
+      // Auto-create a port profile from destination port range if specified without any profiles
+      if ((destPortRange || resolvedPortProfileId) && (!portProfiles || portProfiles.length === 0)) {
         portProfiles = [];
-        if (portProfileId) {
-          portProfiles.push(portProfileId);
+        if (resolvedPortProfileId) {
+          portProfiles.push(resolvedPortProfileId);
         } else if (destPortRange && destPortRange !== 'Any') {
           // Parse port range (e.g., "1022" or "1022-1025")
           const portStr = destPortRange.split(',')[0]?.trim() || ''; // Take first port if range
@@ -2704,7 +2735,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         }
       }
 
-      const allPortProfiles = [...(portProfiles ?? []), ...(portProfileId && !portProfiles ? [portProfileId] : [])];
+      const allPortProfiles = [...(portProfiles ?? [])];
       const payload: Record<string, any> = {
         name: (firewallRule as any).name || firewallRule.description || 'MCP-Rule',
         enabled: firewallRule.isEnabled !== false,
@@ -3362,6 +3393,15 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
       let profileId = natRule.applicationPortProfileId;
       let profileName = natRule.applicationPortProfileName;
+
+      // If applicationPortProfileId was actually passed a name/port instead of a URN, resolve it
+      if (profileId && !profileId.startsWith('urn:vcloud:')) {
+        const resolved = await this.lookupPortProfile(profileId, zoneId);
+        if (!resolved) {
+          throw new Error(`Application port profile '${profileId}' not found. Use list_application_port_profiles to check available names.`);
+        }
+        profileId = resolved;
+      }
 
       // Auto-lookup or create port profile if user specified a port number or name
       if (natRule.internalPort && !profileId) {
@@ -4486,6 +4526,34 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
   }
 
   /**
+   * Fetch ALL application port profiles across pages (raw CloudAPI paginates with
+   * `.values`, not `.items` — default pageSize=25 truncates the ~430+ system profiles,
+   * so a plain single-page GET silently misses matches like "SSH").
+   */
+  private async listAllApplicationPortProfilesRaw(
+    zoneId?: string,
+    scopeFilter?: 'SYSTEM' | 'TENANT' | 'ALL'
+  ): Promise<Array<{ name: string; id: string }>> {
+    const filterQuery = scopeFilter && scopeFilter !== 'ALL' ? `filter=scope==${scopeFilter}&` : '';
+    const pageSize = 128;
+    let page = 1;
+    let all: Array<{ name: string; id: string }> = [];
+    for (let guard = 0; guard < 50; guard++) {
+      const data = await this.makeCloudApiRequest<any>(
+        'GET',
+        `/applicationPortProfiles?${filterQuery}page=${page}&pageSize=${pageSize}`,
+        zoneId
+      );
+      const values: Array<{ name: string; id: string }> = Array.isArray(data) ? data : (data.values ?? []);
+      all = all.concat(values);
+      const total = data?.resultTotal ?? all.length;
+      if (values.length === 0 || all.length >= total) break;
+      page++;
+    }
+    return all;
+  }
+
+  /**
    * Helper: Lookup or auto-create a port profile by port number.
    * If a profile for the port already exists, returns its URN.
    * Otherwise, creates CUSTOM-{PROTOCOL}-{PORT} and returns the URN.
@@ -4499,14 +4567,10 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
   ): Promise<string> {
     const profileName = `CUSTOM-${protocol.toUpperCase()}-${port}`;
 
-    // List existing profiles to see if one matches
-    const listResp = await this.makeCloudApiRequest<{ items: Array<{ name: string; id: string }> }>(
-      'GET',
-      '/applicationPortProfiles',
-      zoneId
-    );
+    // List existing profiles to see if one matches (TENANT scope — this is where auto-created profiles live)
+    const existingProfiles = await this.listAllApplicationPortProfilesRaw(zoneId, 'TENANT');
 
-    const existing = listResp?.items?.find(
+    const existing = existingProfiles.find(
       p => p.name === profileName || (p.name.includes(`-${port}`) && p.name.includes(protocol.toUpperCase()))
     );
 
@@ -4560,14 +4624,14 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       createPayload
     );
 
-    // After creation, list again to get the URN (vCD doesn't return it on POST)
-    const listResp2 = await this.makeCloudApiRequest<{ items: Array<{ name: string; id: string }> }>(
-      'GET',
-      '/applicationPortProfiles',
-      zoneId
-    );
-
-    const created = listResp2?.items?.find(p => p.name === profileName);
+    // After creation, list again to get the URN (vCD doesn't return it on POST).
+    // Retry with backoff — the new profile may not be immediately queryable.
+    let created: { name: string; id: string } | undefined;
+    for (let attempt = 0; attempt < 4 && !created; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
+      const profilesAfterCreate = await this.listAllApplicationPortProfilesRaw(zoneId, 'TENANT');
+      created = profilesAfterCreate.find(p => p.name === profileName);
+    }
     if (!created) {
       throw new Error(`Failed to find created port profile ${profileName}`);
     }
@@ -4580,18 +4644,14 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
    * Returns the profile URN if found, undefined otherwise.
    */
   async lookupPortProfile(nameOrPort: string, zoneId?: string): Promise<string | undefined> {
-    const listResp = await this.makeCloudApiRequest<{ items: Array<{ name: string; id: string }> }>(
-      'GET',
-      '/applicationPortProfiles',
-      zoneId
-    );
+    const allProfiles = await this.listAllApplicationPortProfilesRaw(zoneId, 'ALL');
 
     // Try exact name match first
-    let match = listResp?.items?.find(p => p.name === nameOrPort);
+    let match = allProfiles.find(p => p.name === nameOrPort);
     if (match) return match.id;
 
     // Try port number match (e.g., "1022" matches "CUSTOM-SSH-1022")
-    match = listResp?.items?.find(p => p.name.includes(`-${nameOrPort}`) || p.name.endsWith(nameOrPort));
+    match = allProfiles.find(p => p.name.includes(`-${nameOrPort}`) || p.name.endsWith(nameOrPort));
     return match?.id;
   }
 
