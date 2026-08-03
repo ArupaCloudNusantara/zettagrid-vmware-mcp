@@ -1617,6 +1617,14 @@ export class ZettagridMcpServer {
                 if (cfg?.memory !== undefined && cfg?.memoryMB === undefined) {
                   configErrors.push(`instantiationParams.vmConfigs[${i}]: use "memoryMB" not "memory"`);
                 }
+                // Validate authentication: require at least password or SSH key
+                const ovfProps = cfg?.ovfProperties as any[] | undefined;
+                const hasPassword = ovfProps?.some(p => p.key === 'password' && p.value);
+                const hasPublicKeys = ovfProps?.some(p => p.key === 'public_keys' && p.value);
+                const hasGuestAuthAdmin = cfg?.guestCustomization?.adminPassword;
+                if (!hasPassword && !hasPublicKeys && !hasGuestAuthAdmin) {
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: must provide at least one authentication method: (1) OVF property "password" for cloud-init VMs, (2) OVF property "public_keys" for SSH access, or (3) guestCustomization.adminPassword for Windows VMs`);
+                }
               });
             }
             if (configErrors.length > 0) {
