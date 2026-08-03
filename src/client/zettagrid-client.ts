@@ -2098,7 +2098,12 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
           // For cloud-init templates with MANUAL IP mode, generate netplan user-data
           const ovfPropKeys = renamedCfg.ovfProperties?.map(p => p.key) ?? [];
-          const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+          const isCloudInitTemplate =
+            ovfPropKeys.includes('hostname') ||
+            ovfPropKeys.includes('password') ||
+            ovfPropKeys.includes('instance-id') ||
+            ovfPropKeys.includes('public-keys') ||
+            ovfPropKeys.includes('user-data');
           if (isCloudInitTemplate && renamedCfg.networkConnections?.length) {
             const manualNic = renamedCfg.networkConnections.find(nc => nc.ipMode === 'MANUAL' && nc.ipAddress);
             if (manualNic && manualNic.ipAddress) {
@@ -2169,7 +2174,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       if (vmHref && resolvedVmConfigs.length > 0) {
         const cfg = resolvedVmConfigs[0];
         const ovfPropKeys = cfg?.ovfProperties?.map(p => p.key) ?? [];
-        const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+        const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id') || ovfPropKeys.includes('public-keys') || ovfPropKeys.includes('user-data');
         const hasPoolOrManualMode = cfg?.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
         if (!isCloudInitTemplate && hasPoolOrManualMode) {
@@ -2400,7 +2405,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       // For cloud-init templates with MANUAL IP mode, generate netplan user-data
       let configForXml = finalVmConfig;
       const ovfPropKeys = configForXml.ovfProperties?.map(p => p.key) ?? [];
-      const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+      const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id') || ovfPropKeys.includes('public-keys') || ovfPropKeys.includes('user-data');
       if (isCloudInitTemplate && configForXml.networkConnections?.length && vdcId) {
         const manualNic = configForXml.networkConnections.find(nc => nc.ipMode === 'MANUAL' && nc.ipAddress);
         if (manualNic && manualNic.ipAddress) {
@@ -2448,7 +2453,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       // For non-cloud-init templates with POOL/MANUAL IP mode, enable guest customization post-deployment
       if (configForXml && firstHref) {
         const ovfPropKeys = configForXml.ovfProperties?.map(p => p.key) ?? [];
-        const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+        const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id') || ovfPropKeys.includes('public-keys') || ovfPropKeys.includes('user-data');
         const hasPoolOrManualMode = configForXml.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
         if (!isCloudInitTemplate && hasPoolOrManualMode) {
