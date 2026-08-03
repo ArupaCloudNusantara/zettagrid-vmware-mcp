@@ -1608,9 +1608,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         </ovf:ProductSection>`);
     }
 
-    // GuestCustomizationSection — always injected so ComputerName is stored in VCD.
-    // Enable customization when needed (POOL/MANUAL modes require vCD to apply IP).
-    {
+    // GuestCustomizationSection — skip for cloud-init templates (they handle all config via OVF properties + user-data).
+    // For other templates, include it so ComputerName is stored and customization is enabled when needed.
+    if (!isCloudInitTemplate) {
       const gc = vmConfig.guestCustomization ?? {};
       // Enable customization if explicitly set, or if needsCustomization is true (POOL/MANUAL modes)
       const enabledFlag = gc.enabled !== undefined
