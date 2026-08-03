@@ -1534,11 +1534,16 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     const hostnameFromOvf = vmConfig.ovfProperties?.find(p => p.key === 'hostname')?.value;
     const resolvedComputerName = vmConfig.guestCustomization?.computerName || hostnameFromOvf || vmName;
 
-    // For cloud-init templates (detected by presence of hostname/password/instance-id OVF properties),
+    // For cloud-init templates (detected by presence of cloud-init-specific OVF properties),
     // we disable vCD guest customization and rely on cloud-init's user-data instead.
     // This is more reliable for Ubuntu 24.04+ which uses cloud-init.
     const ovfPropKeys = vmConfig.ovfProperties?.map(p => p.key) ?? [];
-    const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id');
+    const isCloudInitTemplate =
+      ovfPropKeys.includes('hostname') ||
+      ovfPropKeys.includes('password') ||
+      ovfPropKeys.includes('instance-id') ||
+      ovfPropKeys.includes('public-keys') ||  // SSH key is strong indicator of cloud-init
+      ovfPropKeys.includes('user-data');      // Explicit user-data confirms cloud-init
 
     // For cloud-init templates with MANUAL IP mode, user-data will handle network configuration.
     // For non-cloud-init templates or DHCP mode, guest customization may still be needed.
