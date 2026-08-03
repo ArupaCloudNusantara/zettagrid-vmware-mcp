@@ -1496,23 +1496,55 @@ export class ZettagridClient {
         const nets = await getNets();
 
         if (nets.length > 1) {
+          const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+
+          // For Ubuntu 24.04+, include IP suggestions and recommend DHCP/MANUAL modes
+          let networkDataForResponse: any[] = nets.map(n => ({
+            networkName: n.name,
+            networkType: n.linkType === 1 ? 'routed' : n.linkType === 2 ? 'isolated' : 'unknown',
+            availableIps: n.availableIps,
+            totalIps: n.totalIps,
+            gateway: n.defaultGateway,
+            prefix: n.subnetPrefixLength,
+            // For Ubuntu 24.04+, suggest DHCP instead of POOL; otherwise suggest POOL if IPs available
+            suggestedIpMode: isUbuntuModern ? 'DHCP' : (n.availableIps > 0 ? 'POOL' : 'DHCP'),
+          }));
+
+          // If Ubuntu 24.04+, add IP suggestions for routed networks
+          if (isUbuntuModern) {
+            for (let i = 0; i < networkDataForResponse.length; i++) {
+              const net = nets[i]!;
+              if (net && net.linkType === 1) { // routed network
+                try {
+                  const netDetail = await this.fetchNetworkDetailedConfig(net.href, zoneId);
+                  if (netDetail?.ipRanges?.length) {
+                    const range = netDetail.ipRanges[0]!;
+                    const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5);
+                    if (suggestedIps.length > 0) {
+                      networkDataForResponse[i].suggestedIps = suggestedIps;
+                    }
+                  }
+                } catch {
+                  // Continue if network details fail
+                }
+              }
+            }
+          }
+
+          const clarificationMessage = isUbuntuModern
+            ? `Ubuntu 24.04+ detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode (MANUAL with ipAddress from suggestedIps, or DHCP — avoid POOL for Ubuntu 24.04+).`
+            : `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options are in data.availableNetworks.`;
+
           return this.formatMcpResponse(
             {
               needsClarification: true,
-              availableNetworks: nets.map(n => ({
-                networkName: n.name,
-                networkType: n.linkType === 1 ? 'routed' : n.linkType === 2 ? 'isolated' : 'unknown',
-                availableIps: n.availableIps,
-                totalIps: n.totalIps,
-                gateway: n.defaultGateway,
-                prefix: n.subnetPrefixLength,
-                suggestedIpMode: n.availableIps > 0 ? 'POOL' : 'DHCP',
-              }))
+              isUbuntuModern,
+              availableNetworks: networkDataForResponse
             },
             zone,
             {
               code: 'CLARIFICATION_REQUIRED',
-              message: `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options are in data.availableNetworks.`,
+              message: clarificationMessage,
             }
           );
         }
