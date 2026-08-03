@@ -1272,6 +1272,37 @@ export class ZettagridMcpServer {
           return val as number;
         };
 
+        // Validation helpers for ambiguous requests
+        const validateNatRuleRequest = () => {
+          const type = args?.type as string;
+          const hasAppPort = args?.applicationPortProfileId || args?.applicationPortProfileName;
+
+          if (type === 'DNAT' && !hasAppPort && !args?.externalPort) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              'DNAT rule requires either: (1) applicationPortProfileId/Name (RECOMMENDED - defines external port + protocol), or (2) explicit externalPort. ' +
+              'Example: For SSH on port 1022, create a CUSTOM-SSH-1022 application port profile first with create_application_port_profile, then reference it via applicationPortProfileId. ' +
+              'This ensures firewall rules can properly match the port definition.'
+            );
+          }
+        };
+
+        const validateFirewallRuleRequest = () => {
+          const hasDestPort = args?.destinationPortRange;
+          const portProfiles = args?.portProfiles as string[] | undefined;
+          const hasPortProfile = (portProfiles?.length ?? 0) > 0 || args?.portProfileId;
+
+          if (hasDestPort && !hasPortProfile) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              'Firewall rule with port matching MUST use application port profiles (portProfiles or portProfileId), not bare destinationPortRange. ' +
+              'Port ranges alone are ambiguous - use application port profiles to define protocol + port together. ' +
+              'Example: Create CUSTOM-SSH-1022 profile via create_application_port_profile({name: "CUSTOM-SSH-1022", ports: [{protocol: "TCP", destinationPorts: ["1022"]}]}), ' +
+              'then reference it in firewall rule via portProfiles: ["urn:vcloud:applicationPortProfile:..."]'
+            );
+          }
+        };
+
         switch (name) {
           case 'get_server_version': {
             // Get version from package.json and git commit hash
@@ -1368,6 +1399,7 @@ export class ZettagridMcpServer {
             break;
 
           case 'create_firewall_rule': {
+            validateFirewallRuleRequest();
             const firewallRule = {
               name: (args?.name || args?.description) as string,
               description: (args?.description || args?.name) as string,
@@ -1447,6 +1479,7 @@ export class ZettagridMcpServer {
             break;
 
           case 'create_nat_rule':
+            validateNatRuleRequest();
             result = await this.client.createNatRule(
               req('edgeGatewayId'),
               {
