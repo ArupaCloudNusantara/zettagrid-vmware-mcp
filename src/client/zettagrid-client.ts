@@ -1730,6 +1730,36 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       const wantsNetworkDiscovery = effectiveVmConfigs.length > 0
         && effectiveVmConfigs.every(c => !c.networkConnections?.length);
 
+      // For Ubuntu 24.04+ templates, require explicit network/IP mode specification
+      // (prevent accidental broken deployments using template's embedded networks)
+      if (wantsNetworkDiscovery) {
+        const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+        if (isUbuntuModern) {
+          const nets = await getNets();
+          // Even if only one network exists, Ubuntu modern requires explicit specification
+          return this.formatMcpResponse(
+            {
+              needsClarification: true,
+              isUbuntuModern: true,
+              availableNetworks: nets.map(n => ({
+                networkName: n.name,
+                networkType: n.linkType === 1 ? 'routed' : n.linkType === 2 ? 'isolated' : 'unknown',
+                availableIps: n.availableIps,
+                totalIps: n.totalIps,
+                gateway: n.defaultGateway,
+                prefix: n.subnetPrefixLength,
+              })),
+              instructions: 'For Ubuntu 24.04+, you MUST specify networkConnections in vmConfigs with at least networkName and ipMode (MANUAL is recommended with ipAddress from the network\'s available pool). Calling without network specification will use the template\'s embedded network which may not work correctly.',
+            },
+            zone,
+            {
+              code: 'CLARIFICATION_REQUIRED',
+              message: 'Ubuntu 24.04+ detected. Network and IP mode MUST be explicitly specified in vmConfigs.networkConnections — do not rely on auto-discovery. This prevents broken deployments on template embedded networks.',
+            }
+          );
+        }
+      }
+
       if (wantsNetworkDiscovery) {
         const nets = await getNets();
 
