@@ -1230,6 +1230,14 @@ export class ZettagridMcpServer {
             },
             required: ['profileId']
           }
+        },
+        {
+          name: 'get_server_version',
+          description: 'Get the MCP server version and build information',
+          inputSchema: {
+            type: 'object',
+            properties: {}
+          }
         }
       ]
     }));
@@ -1265,6 +1273,34 @@ export class ZettagridMcpServer {
         };
 
         switch (name) {
+          case 'get_server_version': {
+            // Get version from package.json and git commit hash
+            let version = '1.3.0'; // fallback
+            let buildNumber = 'unknown';
+
+            try {
+              const { execSync } = await import('child_process');
+              buildNumber = execSync('git rev-parse --short HEAD 2>/dev/null || echo "unknown"').toString().trim();
+            } catch {
+              // Git not available or not in git repo
+            }
+
+            result = {
+              success: true,
+              data: {
+                name: '@zettagrid/vmware-mcp',
+                version,
+                buildNumber,
+                buildDate: new Date().toISOString(),
+                nodeVersion: process.version,
+                platform: process.platform,
+                arch: process.arch
+              }
+            };
+            responseText = JSON.stringify(result.data, null, 2);
+            break;
+          }
+
           case 'test_zone':
             result = await this.client.testZone(req('zoneId'));
             break;
