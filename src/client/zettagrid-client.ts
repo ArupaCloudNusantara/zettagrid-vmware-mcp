@@ -1160,7 +1160,7 @@ export class ZettagridClient {
   }
 
   /** Fetch detailed network configuration including IP ranges and gateway */
-  private async fetchNetworkDetailedConfig(networkHref: string, zoneId?: string): Promise<{ gateway?: string; subnetMask?: string; ipRanges?: Array<{ startAddress: string; endAddress: string }>; dhcp?: boolean; dhcpPools?: Array<{ startAddress: string; endAddress: string }> } | null> {
+  private async fetchNetworkDetailedConfig(networkHref: string, zoneId?: string): Promise<{ gateway?: string; subnetMask?: string; ipRanges?: Array<{ startAddress: string; endAddress: string }>; dhcp?: boolean; dhcpPools?: Array<{ startAddress: string; endAddress: string }>; usedIps?: string[] } | null> {
     try {
       const pathMatch = networkHref.match(/\/api(\/.+)/);
       const relativePath = pathMatch?.[1] ?? networkHref;
@@ -1205,20 +1205,42 @@ export class ZettagridClient {
 
       const dhcpFullyConfigured = dhcpEnabled && dhcpPools.length > 0;
 
+      // Extract allocated/used IPs from the network configuration
+      const usedIps: Set<string> = new Set();
+
+      // Check for IPs already allocated in StaticIpPool used ranges
+      const usedPoolRe = /<UsedIpAddress>([^<]+)<\/UsedIpAddress>/g;
+      let usedMatch;
+      while ((usedMatch = usedPoolRe.exec(xml)) !== null) {
+        if (usedMatch[1]) {
+          usedIps.add(usedMatch[1]);
+        }
+      }
+
+      // Also check DHCP leases (allocated IPs)
+      const dhcpLeaseRe = /<DhcpLeaseInfo>\s*<IpAddress>([^<]+)<\/IpAddress>/g;
+      let leaseMatch;
+      while ((leaseMatch = dhcpLeaseRe.exec(xml)) !== null) {
+        if (leaseMatch[1]) {
+          usedIps.add(leaseMatch[1]);
+        }
+      }
+
       return {
         gateway,
         subnetMask,
         ipRanges: ipRanges.length > 0 ? ipRanges : undefined,
         dhcp: dhcpFullyConfigured,
-        dhcpPools: dhcpPools.length > 0 ? dhcpPools : undefined
+        dhcpPools: dhcpPools.length > 0 ? dhcpPools : undefined,
+        usedIps: usedIps.size > 0 ? Array.from(usedIps) : undefined
       };
     } catch (e) {
       return null;
     }
   }
 
-  /** Generate suggested available IPs from a network's IP range */
-  private generateSuggestedIps(gateway: string | undefined, startAddress: string | undefined, endAddress: string | undefined, count: number = 5): string[] {
+  /** Generate suggested available IPs from a network's IP range, skipping already-used IPs */
+  private generateSuggestedIps(gateway: string | undefined, startAddress: string | undefined, endAddress: string | undefined, count: number = 5, usedIps?: string[]): string[] {
     try {
       if (!startAddress || !endAddress) return [];
 
@@ -1235,17 +1257,21 @@ export class ZettagridClient {
       const range = endNum - startNum;
 
       const suggested: string[] = [];
+      const usedSet = new Set(usedIps || []);
       if (range < 1) return [];
 
-      // Generate IPs spread across the range, avoiding gateway
+      // Generate IPs spread across the range, avoiding gateway and already-used IPs
       const step = Math.max(1, Math.floor(range / (count + 1)));
-      for (let i = 1; i <= count && suggested.length < count; i++) {
+      for (let i = 1; i <= count * 3 && suggested.length < count; i++) { // Try up to 3x the candidates to account for used IPs
         const ip = startNum + (step * i);
         if (ip >= startNum && ip <= endNum) {
           const ipStr = `${(ip >>> 24) & 0xFF}.${(ip >>> 16) & 0xFF}.${(ip >>> 8) & 0xFF}.${ip & 0xFF}`;
-          // Skip gateway and broadcast
+
+          // Skip gateway, broadcast, and already-used IPs
           if (gateway && ipStr === gateway) continue;
           if (ipStr === endAddress) continue;
+          if (usedSet.has(ipStr)) continue;
+
           suggested.push(ipStr);
         }
       }
@@ -1541,7 +1567,7 @@ export class ZettagridClient {
                   const netDetail = await this.fetchNetworkDetailedConfig(net.href, zoneId);
                   if (netDetail?.ipRanges?.length) {
                     const range = netDetail.ipRanges[0]!;
-                    const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5);
+                    const suggestedIps = this.generateSuggestedIps(netDetail.gateway, range.startAddress, range.endAddress, 5, netDetail.usedIps);
                     if (suggestedIps.length > 0) {
                       networkDataForResponse[i].suggestedIps = suggestedIps;
                     }
