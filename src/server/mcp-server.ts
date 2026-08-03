@@ -942,7 +942,7 @@ export class ZettagridMcpServer {
                         },
                         ovfProperties: {
                           type: 'array',
-                          description: 'OVF ProductSection properties for cloud-init (Ubuntu). Keys: hostname, instance-id (required), password, public-keys, user-data (base64), seedfrom',
+                          description: 'OVF ProductSection properties for cloud-init (Ubuntu). SSH KEY USAGE: Set "public-keys" (hyphenated) to the raw SSH public key string (e.g., "ssh-ed25519 AAAAC3..."). Do NOT embed SSH keys in "user-data" — use the dedicated "public-keys" property. If using "user-data", it MUST be base64-encoded. Keys: hostname, instance-id, password, public-keys (for SSH — raw, not encoded), user-data (MUST be base64-encoded), seedfrom',
                           items: {
                             type: 'object',
                             properties: {
@@ -1653,10 +1653,27 @@ export class ZettagridMcpServer {
                 // Validate authentication: require at least password or SSH key
                 const ovfProps = cfg?.ovfProperties as any[] | undefined;
                 const hasPassword = ovfProps?.some(p => p.key === 'password' && p.value);
-                const hasPublicKeys = ovfProps?.some(p => p.key === 'public_keys' && p.value);
+                const hasPublicKeys = ovfProps?.some(p => p.key === 'public-keys' && p.value);
                 const hasGuestAuthAdmin = cfg?.guestCustomization?.adminPassword;
+
+                // Check for common SSH key mistakes
+                const hasPublicKeysUnderscore = ovfProps?.some(p => p.key === 'public_keys' && p.value);
+                const hasUserData = ovfProps?.some(p => p.key === 'user-data' && p.value);
+
+                if (hasPublicKeysUnderscore) {
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: OVF property key should be "public-keys" (hyphen), not "public_keys" (underscore)`);
+                }
+
+                if (hasUserData) {
+                  const userDataProp = ovfProps?.find(p => p.key === 'user-data');
+                  // Check if user-data looks like unencoded YAML (starts with #cloud-config)
+                  if (userDataProp?.value && typeof userDataProp.value === 'string' && userDataProp.value.startsWith('#')) {
+                    configErrors.push(`instantiationParams.vmConfigs[${i}]: OVF property "user-data" must be BASE64-encoded. Cloud-init reads the raw base64 value and decodes it. To inject SSH keys, use "public-keys" property instead (raw, not encoded).`);
+                  }
+                }
+
                 if (!hasPassword && !hasPublicKeys && !hasGuestAuthAdmin) {
-                  configErrors.push(`instantiationParams.vmConfigs[${i}]: must provide at least one authentication method: (1) OVF property "password" for cloud-init VMs, (2) OVF property "public_keys" for SSH access, or (3) guestCustomization.adminPassword for Windows VMs`);
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: must provide at least one authentication method: (1) OVF property "public-keys" (raw SSH public key string) for cloud-init Linux VMs, (2) OVF property "password" for cloud-init VMs, or (3) guestCustomization.adminPassword for Windows VMs`);
                 }
               });
             }
