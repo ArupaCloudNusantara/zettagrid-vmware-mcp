@@ -1495,12 +1495,15 @@ export class ZettagridClient {
     }
 
     // GuestCustomizationSection — always injected so ComputerName is stored in VCD.
-    // For Linux cloud-init VMs (no explicit guestCustomization), NeedsCustomization stays
-    // false so VCD's open-vm-tools agent is NOT triggered; the section is stored only.
+    // Enable customization when needed (POOL/MANUAL modes require vCD to apply IP).
     {
       const gc = vmConfig.guestCustomization ?? {};
+      // Enable customization if explicitly set, or if needsCustomization is true (POOL/MANUAL modes)
+      const enabledFlag = gc.enabled !== undefined
+        ? gc.enabled
+        : needsCustomization;
       const fields = [
-        gc.enabled !== undefined              ? `<Enabled>${gc.enabled}</Enabled>` : '',
+        `<Enabled>${enabledFlag}</Enabled>`,
         gc.changeSid !== undefined            ? `<ChangeSid>${gc.changeSid}</ChangeSid>` : '',
         gc.adminPasswordEnabled !== undefined  ? `<AdminPasswordEnabled>${gc.adminPasswordEnabled}</AdminPasswordEnabled>` : '',
         gc.adminPasswordAuto !== undefined     ? `<AdminPasswordAuto>${gc.adminPasswordAuto}</AdminPasswordAuto>` : '',
