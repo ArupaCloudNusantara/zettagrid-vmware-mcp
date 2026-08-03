@@ -64,6 +64,17 @@ function vappUuid(vappId: string): string {
   return vappId.startsWith('urn:vcloud:vapp:') ? vappId.slice(16) : vappId;
 }
 
+// XML escaping utility — prevents injection and XML parsing errors in user-provided values
+function xmlEscape(value: string | undefined): string {
+  if (!value) return '';
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
 export class ZettagridClient {
   private zoneManager: ZoneManager;
   private tokenManager: TokenManager;
@@ -1475,7 +1486,7 @@ export class ZettagridClient {
         ? vmConfig.ovfProperties
         : [{ key: 'hostname', value: resolvedComputerName }, ...vmConfig.ovfProperties];
       const props = effectiveProps.map(p =>
-        `<ovf:Property ovf:key="${p.key}" ovf:type="string" ovf:value="${p.value}"/>`
+        `<ovf:Property ovf:key="${xmlEscape(p.key)}" ovf:type="string" ovf:value="${xmlEscape(p.value)}"/>`
       ).join('\n            ');
       instSections.push(`<ovf:ProductSection xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">
             <ovf:Info>OVF properties</ovf:Info>
@@ -1493,10 +1504,10 @@ export class ZettagridClient {
         gc.changeSid !== undefined            ? `<ChangeSid>${gc.changeSid}</ChangeSid>` : '',
         gc.adminPasswordEnabled !== undefined  ? `<AdminPasswordEnabled>${gc.adminPasswordEnabled}</AdminPasswordEnabled>` : '',
         gc.adminPasswordAuto !== undefined     ? `<AdminPasswordAuto>${gc.adminPasswordAuto}</AdminPasswordAuto>` : '',
-        gc.adminPassword                       ? `<AdminPassword>${gc.adminPassword}</AdminPassword>` : '',
+        gc.adminPassword                       ? `<AdminPassword>${xmlEscape(gc.adminPassword)}</AdminPassword>` : '',
         gc.resetPasswordRequired !== undefined ? `<ResetPasswordRequired>${gc.resetPasswordRequired}</ResetPasswordRequired>` : '',
-        `<ComputerName>${resolvedComputerName}</ComputerName>`,
-        gc.customizationScript                 ? `<CustomizationScript>${gc.customizationScript}</CustomizationScript>` : '',
+        `<ComputerName>${xmlEscape(resolvedComputerName)}</ComputerName>`,
+        gc.customizationScript                 ? `<CustomizationScript>${xmlEscape(gc.customizationScript)}</CustomizationScript>` : '',
       ].filter(Boolean).join('\n            ');
       instSections.push(`<GuestCustomizationSection>
             <ovf:Info xmlns:ovf="http://schemas.dmtf.org/ovf/envelope/1">Guest customization</ovf:Info>
@@ -1531,7 +1542,7 @@ export class ZettagridClient {
     <SourcedItem>
         <Source href="${vmHref}" />
         <VmGeneralParams>
-            <Name>${vmName}</Name>
+            <Name>${xmlEscape(vmName)}</Name>
             <NeedsCustomization>${needsCustomization ? 'true' : 'false'}</NeedsCustomization>
         </VmGeneralParams>${networkAssignmentsXml}${instParamsXml}${storageProfileXml}
     </SourcedItem>`;
@@ -1544,7 +1555,37 @@ export class ZettagridClient {
    *   - 2+ routed networks → returns CLARIFICATION_REQUIRED with available options
    *   - 0 routed networks  → proceeds without network (isolated VM)
    */
+  /**
+   * Create a new vApp from template.
+   *
+   * ⚠️ PARAMETER ORDER: vdcId, templateId, vappName, zoneId (optional), instantiationParams (optional)
+   *
+   * Common mistakes (caught by TypeScript):
+   * - ❌ createVApp(vdcId, templateId, vappName, instantiationParams, zoneId)  // WRONG ORDER
+   * - ✅ createVApp(vdcId, templateId, vappName, zoneId, instantiationParams)  // CORRECT
+   * - ❌ createVApp(vdcId, templateId, vappName, { vmConfigs }, "cibitung")   // WRONG ORDER
+   * - ✅ createVApp(vdcId, templateId, vappName, "cibitung", { vmConfigs })   // CORRECT
+   */
   async createVApp(vdcId: string, templateId: string, vappName: string, zoneId?: string, instantiationParams?: VAppInstantiationParams): Promise<McpToolResponse<any>> {
+    // Runtime guard: detect if parameters were reversed (zoneId is an object instead of string)
+    if (zoneId && typeof zoneId === 'object') {
+      throw new Error(
+        'PARAMETER ORDER ERROR in createVApp: parameters appear to be reversed.\n' +
+        'Expected: createVApp(vdcId, templateId, vappName, zoneId, instantiationParams)\n' +
+        'Got: createVApp(vdcId, templateId, vappName, <object>, <string>)\n' +
+        'The 4th parameter should be zoneId (string), not instantiationParams (object).'
+      );
+    }
+    // Runtime guard: detect if instantiationParams is a string (likely zoneId in wrong position)
+    if (instantiationParams && typeof instantiationParams === 'string') {
+      throw new Error(
+        'PARAMETER ORDER ERROR in createVApp: parameters appear to be reversed.\n' +
+        'Expected: createVApp(vdcId, templateId, vappName, zoneId, instantiationParams)\n' +
+        'Got: createVApp(vdcId, templateId, vappName, <string>, <string>)\n' +
+        'The 5th parameter should be instantiationParams (object), not zoneId (string).'
+      );
+    }
+
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
       // Resolve catalogItem href → vAppTemplate href (VCD instantiateVAppTemplate requires vAppTemplate URL)
@@ -1915,7 +1956,7 @@ export class ZettagridClient {
       const createVAppPayload = `<?xml version="1.0" encoding="UTF-8"?>
 <InstantiateVAppTemplateParams
     xmlns="http://www.vmware.com/vcloud/v1.5"
-    name="${vappName}"
+    name="${xmlEscape(vappName)}"
     deploy="false"
     powerOn="false">
     <Description>Created by Zettagrid MCP Server</Description>${vappInstParamsXml}
