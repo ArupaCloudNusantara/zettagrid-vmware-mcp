@@ -37,7 +37,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (client) client.disconnect();
+  log.info('Starting Monitoring & Metrics Suite teardown...');
+  try {
+    if (client) {
+      log.info('Disconnecting client');
+      client.disconnect();
+      log.info('Client disconnected');
+    }
+  } catch (e) {
+    log.warn(`Error during disconnect: ${e.message}`);
+  }
   log.separator('Monitoring & Metrics Suite — Teardown complete');
 });
 

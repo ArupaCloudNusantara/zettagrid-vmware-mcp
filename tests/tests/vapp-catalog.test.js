@@ -23,6 +23,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  log.info('Starting vApp & Catalog Suite teardown...');
   // Best-effort cleanup of any vApp created during UC-VA-001
   if (created.vappId) {
     log.info(`Teardown: deleting test vApp ${created.vappId}`);
@@ -31,11 +32,20 @@ afterAll(async () => {
       const r = await client.call('delete_vapp', { vappId: created.vappId, force: true });
       const tid = get(r, 'taskId') || get(r, 'task', 'id');
       if (tid) await waitForTask(client, tid).catch(() => {});
+      log.info('vApp cleanup completed');
     } catch (e) {
       log.warn(`Teardown delete_vapp failed: ${e.message}`);
     }
   }
-  if (client) client.disconnect();
+  try {
+    if (client) {
+      log.info('Disconnecting client');
+      client.disconnect();
+      log.info('Client disconnected');
+    }
+  } catch (e) {
+    log.warn(`Error during disconnect: ${e.message}`);
+  }
   log.separator('vApp & Catalog Suite — Teardown complete');
 });
 

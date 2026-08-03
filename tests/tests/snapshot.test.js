@@ -23,13 +23,23 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  log.info('Starting Snapshot Management Suite teardown...');
   // Safety net: remove all snapshots from the test VM on teardown
   if (state.snapshotCreated) {
     log.info('Teardown: removing test snapshots');
     await client.call('remove_snapshots', { vmId: cfg.fixtures.vmIdOff })
       .catch(e => log.warn(`Teardown snapshot removal: ${e.message}`));
+    log.info('Snapshot cleanup completed');
   }
-  if (client) client.disconnect();
+  try {
+    if (client) {
+      log.info('Disconnecting client');
+      client.disconnect();
+      log.info('Client disconnected');
+    }
+  } catch (e) {
+    log.warn(`Error during disconnect: ${e.message}`);
+  }
   log.separator('Snapshot Management Suite — Teardown complete');
 });
 
