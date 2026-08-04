@@ -4542,13 +4542,17 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
    * Fetch ALL application port profiles across pages (raw CloudAPI paginates with
    * `.values`, not `.items` — default pageSize=25 truncates the ~430+ system profiles,
    * so a plain single-page GET silently misses matches like "SSH").
+   *
+   * pageSize must stay at 25 (the server's own default) — pageSize=128 is rejected
+   * at the connection level (bare "fetch failed", no HTTP response) by the gateway in
+   * front of this zone's vCD, even with retries. 25 is the only value confirmed to work.
    */
   private async listAllApplicationPortProfilesRaw(
     zoneId?: string,
     scopeFilter?: 'SYSTEM' | 'TENANT' | 'ALL'
   ): Promise<Array<{ name: string; id: string }>> {
     const filterQuery = scopeFilter && scopeFilter !== 'ALL' ? `filter=scope==${scopeFilter}&` : '';
-    const pageSize = 128;
+    const pageSize = 25;
     let page = 1;
     let all: Array<{ name: string; id: string }> = [];
     for (let guard = 0; guard < 50; guard++) {
