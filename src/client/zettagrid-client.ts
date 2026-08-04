@@ -2698,6 +2698,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       let portProfiles = firewallRule.portProfiles ?? (firewallRule as any).portProfiles as string[] | undefined;
       const portProfileId = (firewallRule as any).portProfileId as string | undefined;
       const destPortRange = (firewallRule as any).destinationPortRange as string | undefined;
+      // Which VDC to scope an auto-created port profile to — required when the org has
+      // more than one VDC (getOrCreatePortProfile refuses to guess in that case).
+      const vdcId = (firewallRule as any).vdcId as string | undefined;
       // Governs auto-created profiles from a bare port number/range only. Defaults to
       // 'tcp' (the overwhelmingly common case); pass protocol: 'udp' explicitly for UDP.
       // ICMP has no port concept, so bare-port auto-create rejects it — reference an
@@ -2722,7 +2725,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           }
           // getOrCreatePortProfile already searches by actual port content before
           // creating anything — no need for a separate lookupPortProfile pre-check here.
-          return await this.getOrCreatePortProfile(token, requestedProtocol.toUpperCase(), undefined, zoneId);
+          return await this.getOrCreatePortProfile(token, requestedProtocol.toUpperCase(), vdcId, zoneId);
         }
         // Named profile (e.g. "SSH", "CUSTOM-SSH-1022") — must already exist
         const found = await this.lookupPortProfile(token, zoneId);
@@ -2762,7 +2765,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           if (portStr && /^\d+(-\d+)?$/.test(portStr)) {
             const port = portStr.split('-')[0] || ''; // Use start of range
             if (port) {
-              const profileId = await this.getOrCreatePortProfile(port, requestedProtocol.toUpperCase(), undefined, zoneId);
+              const profileId = await this.getOrCreatePortProfile(port, requestedProtocol.toUpperCase(), vdcId, zoneId);
               portProfiles.push(profileId);
             }
           }
@@ -3409,6 +3412,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       applicationPortProfileName?: string;
       firewallMatch?: string;
       protocol?: string;
+      // Which VDC to scope an auto-created port profile to — required when the org has
+      // more than one VDC (getOrCreatePortProfile refuses to guess in that case).
+      vdcId?: string;
     },
     zoneId?: string
   ): Promise<McpToolResponse<any>> {
@@ -3462,10 +3468,10 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         if (natRule.internalPort === '22' && requestedProtocol === 'tcp') {
           // Use standard SSH profile
           const sshProfile = await this.lookupPortProfile('SSH', zoneId);
-          profileId = sshProfile || await this.getOrCreatePortProfile(natRule.internalPort, 'TCP', undefined, zoneId, true);
+          profileId = sshProfile || await this.getOrCreatePortProfile(natRule.internalPort, 'TCP', natRule.vdcId, zoneId, true);
         } else {
           // Create custom profile for this port
-          profileId = await this.getOrCreatePortProfile(natRule.internalPort, requestedProtocol.toUpperCase(), undefined, zoneId, true);
+          profileId = await this.getOrCreatePortProfile(natRule.internalPort, requestedProtocol.toUpperCase(), natRule.vdcId, zoneId, true);
         }
         profileName = profileId.split(':').pop();
       } else if (natRule.applicationPortProfileName && !profileId) {
@@ -4699,9 +4705,20 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     // live: the bare /admin/extension root returns 200 but an empty stub with no links —
     // no URL under that namespace will work for a tenant credential). /query?type=orgVdc
     // (via listVdcs, already used elsewhere for this exact purpose) is tenant-accessible.
+    //
+    // Auto-select only when unambiguous (exactly one VDC) — orgs with multiple VDCs must
+    // pass vdcId explicitly. Silently picking "whichever VDC listVdcs happens to return
+    // first" would scope the new profile to a VDC the caller never chose.
     if (!vdcId) {
       const vdcsResp = await this.listVdcs(zoneId);
-      vdcId = vdcsResp.data?.items?.[0]?.id ? String(vdcsResp.data.items[0].id) : '';
+      const vdcs = vdcsResp.data?.items ?? [];
+      if (vdcs.length > 1) {
+        throw new Error(
+          `Ambiguous VDC for port profile creation — ${vdcs.length} VDCs exist in this org/zone ` +
+          `(${vdcs.map(v => v.name).join(', ')}). Pass vdcId explicitly to disambiguate.`
+        );
+      }
+      vdcId = vdcs[0]?.id ? String(vdcs[0].id) : '';
     }
 
     if (!vdcId) {

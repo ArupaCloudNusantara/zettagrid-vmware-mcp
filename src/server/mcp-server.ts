@@ -480,6 +480,10 @@ export class ZettagridMcpServer {
                 items: { type: 'string' },
                 description: 'Destination firewall group URNs (IP sets, security groups). Omit for Any.'
               },
+              vdcId: {
+                type: 'string',
+                description: 'VDC ID to scope an auto-created port profile to (from destinationPortRange/portProfiles bare port numbers). Only needed if the org has more than one VDC — the tool refuses to guess which one and will error asking for this if omitted and ambiguous. Get it from list_vdcs.'
+              },
               zoneId: {
                 type: 'string',
                 description: 'Zone ID (optional)',
@@ -602,6 +606,7 @@ export class ZettagridMcpServer {
               applicationPortProfileId: { type: 'string', description: 'Application port profile URN (optional — use internalPort instead for auto-creation)' },
               applicationPortProfileName: { type: 'string', description: 'Application port profile name to lookup and use (e.g. "SSH", "HTTP", "CUSTOM-SSH-1022"). Tool looks up the profile by name.' },
               firewallMatch: { type: 'string', enum: ['MATCH_INTERNAL_ADDRESS', 'MATCH_EXTERNAL_ADDRESS', 'BYPASS'], description: 'Firewall match mode (default: MATCH_INTERNAL_ADDRESS)' },
+              vdcId: { type: 'string', description: 'VDC ID to scope an auto-created port profile to (from internalPort). Only needed if the org has more than one VDC — the tool refuses to guess which one and will error asking for this if omitted and ambiguous. Get it from list_vdcs.' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['edgeGatewayId', 'name', 'type', 'externalAddresses', 'internalAddresses']
@@ -1402,6 +1407,7 @@ export class ZettagridMcpServer {
               // Governs the protocol of any port profile auto-created from a bare port
               // number/range (portProfiles entry or destinationPortRange) — default 'tcp'.
               protocol: args?.protocol as string | undefined,
+              vdcId: args?.vdcId as string | undefined,
               protocols: {
                 tcp: args?.protocol === 'tcp' || args?.protocol === 'any',
                 udp: args?.protocol === 'udp' || args?.protocol === 'any',
@@ -1483,6 +1489,7 @@ export class ZettagridMcpServer {
                 ...(args?.applicationPortProfileId !== undefined && { applicationPortProfileId: args.applicationPortProfileId as string }),
                 ...(args?.applicationPortProfileName !== undefined && { applicationPortProfileName: args.applicationPortProfileName as string }),
                 ...(args?.firewallMatch !== undefined && { firewallMatch: args.firewallMatch as string }),
+                ...(args?.vdcId !== undefined && { vdcId: args.vdcId as string }),
               },
               args?.zoneId as string | undefined
             );
