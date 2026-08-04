@@ -4587,8 +4587,10 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     // List existing profiles to see if one matches (TENANT scope — this is where auto-created profiles live)
     const existingProfiles = await this.listAllApplicationPortProfilesRaw(zoneId, 'TENANT');
 
+    // Anchored to the exact trailing "-{port}" segment — see lookupPortProfile for why
+    // an unanchored includes() check is unsafe (e.g. port "1022" vs "CUSTOM-SSH-10220").
     const existing = existingProfiles.find(
-      p => p.name === profileName || (p.name.includes(`-${port}`) && p.name.includes(protocol.toUpperCase()))
+      p => p.name === profileName || (p.name.split('-').pop() === port && p.name.toUpperCase().includes(protocol.toUpperCase()))
     );
 
     if (existing) {
@@ -4667,8 +4669,10 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     let match = allProfiles.find(p => p.name === nameOrPort);
     if (match) return match.id;
 
-    // Try port number match (e.g., "1022" matches "CUSTOM-SSH-1022")
-    match = allProfiles.find(p => p.name.includes(`-${nameOrPort}`) || p.name.endsWith(nameOrPort));
+    // Try port number match (e.g., "1022" matches "CUSTOM-SSH-1022"). Anchored to the
+    // exact trailing "-{port}" segment — an unanchored substring/endsWith check would
+    // match "1022" against "CUSTOM-SSH-10220" too (a real collision seen in this org).
+    match = allProfiles.find(p => p.name.split('-').pop() === nameOrPort);
     return match?.id;
   }
 

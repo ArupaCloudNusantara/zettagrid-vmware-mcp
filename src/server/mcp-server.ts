@@ -1288,22 +1288,6 @@ export class ZettagridMcpServer {
           }
         };
 
-        const validateFirewallRuleRequest = () => {
-          const hasDestPort = args?.destinationPortRange;
-          const portProfiles = args?.portProfiles as string[] | undefined;
-          const hasPortProfile = (portProfiles?.length ?? 0) > 0 || args?.portProfileId;
-
-          if (hasDestPort && !hasPortProfile) {
-            throw new McpError(
-              ErrorCode.InvalidParams,
-              'Firewall rule with port matching MUST use application port profiles (portProfiles or portProfileId), not bare destinationPortRange. ' +
-              'Port ranges alone are ambiguous - use application port profiles to define protocol + port together. ' +
-              'Example: Create CUSTOM-SSH-1022 profile via create_application_port_profile({name: "CUSTOM-SSH-1022", ports: [{protocol: "TCP", destinationPorts: ["1022"]}]}), ' +
-              'then reference it in firewall rule via portProfiles: ["urn:vcloud:applicationPortProfile:..."]'
-            );
-          }
-        };
-
         switch (name) {
           case 'get_server_version': {
             // Get version from package.json and git commit hash
@@ -1400,7 +1384,6 @@ export class ZettagridMcpServer {
             break;
 
           case 'create_firewall_rule': {
-            validateFirewallRuleRequest();
             const firewallRule = {
               name: (args?.name || args?.description) as string,
               description: (args?.description || args?.name) as string,
