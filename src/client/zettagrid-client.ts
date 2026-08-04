@@ -1621,9 +1621,17 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         </ovf:ProductSection>`);
     }
 
-    // GuestCustomizationSection — skip for cloud-init templates (they handle all config via OVF properties + user-data).
-    // For other templates, include it so ComputerName is stored and customization is enabled when needed.
-    if (!isCloudInitTemplate) {
+    // GuestCustomizationSection — always included, with Enabled explicitly set (not omitted).
+    // A prior version of this code omitted the section entirely for cloud-init templates,
+    // on the theory that omitting it disables customization. Live-verified 2026-08-05 that
+    // theory is wrong: omitting the section doesn't disable anything — vCD just falls back
+    // to whatever GuestCustomizationSection the SOURCE TEMPLATE already ships with, which for
+    // this org's Ubuntu 24.04 template is Enabled=true. The portal showed "Enable guest
+    // customization: Enabled" on a cloud-init VM created by the omit-the-section code, proving
+    // it silently failed to disable anything. Explicitly sending Enabled=false (below, already
+    // correctly computed as `needsCustomization` for cloud-init) is the only way to actually
+    // turn it off, regardless of what the template itself defaults to.
+    {
       const gc = vmConfig.guestCustomization ?? {};
       // Enable customization if explicitly set, or if needsCustomization is true (POOL/MANUAL modes)
       const enabledFlag = gc.enabled !== undefined
