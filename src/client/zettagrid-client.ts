@@ -2720,8 +2720,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
               `Use list_application_port_profiles to find an existing ICMPv4/ICMPv6 profile and pass its name/URN instead.`
             );
           }
-          const found = await this.lookupPortProfile(token, zoneId);
-          return found || await this.getOrCreatePortProfile(token, requestedProtocol.toUpperCase(), undefined, zoneId);
+          // getOrCreatePortProfile already searches by actual port content before
+          // creating anything — no need for a separate lookupPortProfile pre-check here.
+          return await this.getOrCreatePortProfile(token, requestedProtocol.toUpperCase(), undefined, zoneId);
         }
         // Named profile (e.g. "SSH", "CUSTOM-SSH-1022") — must already exist
         const found = await this.lookupPortProfile(token, zoneId);
@@ -3428,9 +3429,15 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       let profileId = natRule.applicationPortProfileId;
       let profileName = natRule.applicationPortProfileName;
 
-      // If applicationPortProfileId was actually passed a name/port instead of a URN, resolve it
+      // Anything other than an explicit 'udp'/'icmp' (unset or an unrecognized value)
+      // defaults to TCP — the vast majority of use cases.
+      const requestedProtocolRaw = (natRule.protocol || 'tcp').toLowerCase();
+      const requestedProtocol = requestedProtocolRaw === 'udp' || requestedProtocolRaw === 'icmp' ? requestedProtocolRaw : 'tcp';
+
+      // If applicationPortProfileId was actually passed a name/port instead of a URN, resolve
+      // it. requireUsableForNAT=true: if it's a bare port number, only a NAT-usable match counts.
       if (profileId && !profileId.startsWith('urn:vcloud:')) {
-        const resolved = await this.lookupPortProfile(profileId, zoneId);
+        const resolved = await this.lookupPortProfile(profileId, zoneId, requestedProtocol.toUpperCase(), 'ALL', true);
         if (!resolved) {
           throw new Error(`Application port profile '${profileId}' not found. Use list_application_port_profiles to check available names.`);
         }
@@ -3442,10 +3449,6 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       // (SSH, HTTP/S, custom TCP services); pass protocol: 'udp' explicitly for UDP
       // services. ICMP has no port concept, so it's not meaningful for internalPort
       // auto-create — reference an existing ICMP profile via applicationPortProfileId/Name.
-      // Anything other than an explicit 'udp'/'icmp' (unset or an unrecognized value)
-      // defaults to TCP — the vast majority of use cases.
-      const requestedProtocolRaw = (natRule.protocol || 'tcp').toLowerCase();
-      const requestedProtocol = requestedProtocolRaw === 'udp' || requestedProtocolRaw === 'icmp' ? requestedProtocolRaw : 'tcp';
       if (natRule.internalPort && !profileId && requestedProtocol === 'icmp') {
         throw new Error(
           `internalPort auto-create doesn't support ICMP (ICMP has no port number). ` +
@@ -3453,14 +3456,16 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         );
       }
       if (natRule.internalPort && !profileId) {
-        // User specified internalPort number — auto-create/lookup "SSH" or CUSTOM-{PROTOCOL}-{port}
+        // User specified internalPort number — auto-create/lookup "SSH" or CUSTOM-{PROTOCOL}-{port}.
+        // requireUsableForNAT=true: some SYSTEM profiles that match by port content are
+        // usableForNAT: false (e.g. BFD, Heartbeat) and vCD rejects them on a NAT rule.
         if (natRule.internalPort === '22' && requestedProtocol === 'tcp') {
           // Use standard SSH profile
           const sshProfile = await this.lookupPortProfile('SSH', zoneId);
-          profileId = sshProfile || await this.getOrCreatePortProfile(natRule.internalPort, 'TCP', undefined, zoneId);
+          profileId = sshProfile || await this.getOrCreatePortProfile(natRule.internalPort, 'TCP', undefined, zoneId, true);
         } else {
           // Create custom profile for this port
-          profileId = await this.getOrCreatePortProfile(natRule.internalPort, requestedProtocol.toUpperCase(), undefined, zoneId);
+          profileId = await this.getOrCreatePortProfile(natRule.internalPort, requestedProtocol.toUpperCase(), undefined, zoneId, true);
         }
         profileName = profileId.split(':').pop();
       } else if (natRule.applicationPortProfileName && !profileId) {
@@ -4609,33 +4614,82 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
   }
 
   /**
+   * Search for an existing application port profile that already covers an exact
+   * protocol + port number — under ANY name, not just ones following our own
+   * CUSTOM-{PROTOCOL}-{PORT} convention (e.g. the SYSTEM "SSH" profile for port 22,
+   * "HTTPS" for 443). Users creating NAT/firewall rules generally only know the port
+   * number, not any profile's name, so this is the real reuse check — the name-based
+   * matching used elsewhere only ever finds profiles WE previously created.
+   *
+   * Pushes protocol/port/usableForNAT filtering server-side, but `destinationPorts==`
+   * is a substring match, not exact equality (verified live: querying "22" also returns
+   * "1022", "10220", "22024", etc.) — so this always does an exact client-side re-check
+   * on the (small, pre-filtered) candidate set before trusting a match.
+   */
+  private async findPortProfileByPortContent(
+    port: string,
+    protocol: string,
+    zoneId?: string,
+    scope: 'SYSTEM' | 'TENANT' | 'ALL' = 'ALL',
+    requireUsableForNAT: boolean = false
+  ): Promise<{ id: string; name: string } | undefined> {
+    const filterParts: string[] = [];
+    if (scope !== 'ALL') filterParts.push(`scope==${scope}`);
+    if (requireUsableForNAT) filterParts.push('usableForNAT==true');
+    filterParts.push(`applicationPorts.protocol==${protocol}`);
+    filterParts.push(`applicationPorts.destinationPorts==${port}`);
+    const filter = filterParts.join(';');
+
+    const data = await this.makeCloudApiRequest<any>(
+      'GET',
+      `/applicationPortProfiles?filter=${encodeURIComponent(filter)}&page=1&pageSize=25`,
+      zoneId
+    );
+    const values: Array<{
+      id: string;
+      name: string;
+      applicationPorts?: Array<{ protocol: string; destinationPorts?: string[] }>;
+    }> = Array.isArray(data) ? data : (data.values ?? []);
+
+    const exact = values.find(p =>
+      (p.applicationPorts ?? []).some(ap => ap.protocol === protocol && (ap.destinationPorts ?? []).includes(port))
+    );
+    return exact ? { id: exact.id, name: exact.name } : undefined;
+  }
+
+  /**
    * Helper: Lookup or auto-create a port profile by port number.
    * If a profile for the port already exists, returns its URN.
    * Otherwise, creates CUSTOM-{PROTOCOL}-{PORT} and returns the URN.
    * Useful for seamless NAT/firewall rule creation without manual profile management.
+   *
+   * @param requireUsableForNAT Pass true from NAT-rule call sites — some SYSTEM profiles
+   *   that would otherwise match by port content are usableForNAT: false (e.g. BFD,
+   *   Heartbeat, Data Recovery Appliance) and vCD rejects them on a NAT rule. Irrelevant
+   *   for firewall rules, where any matching profile is valid to reuse.
    */
   async getOrCreatePortProfile(
     port: string,
     protocol: string = 'TCP',
     vdcId?: string,
-    zoneId?: string
+    zoneId?: string,
+    requireUsableForNAT: boolean = false
   ): Promise<string> {
     // ICMP has no port concept — one profile per ICMP version, not per port.
     const isIcmp = /^icmp/i.test(protocol);
     const normalizedProtocol = isIcmp ? (/6$/.test(protocol) ? 'ICMPv6' : 'ICMPv4') : protocol.toUpperCase();
     const profileName = isIcmp ? `CUSTOM-${normalizedProtocol}` : `CUSTOM-${normalizedProtocol}-${port}`;
 
-    // List existing profiles to see if one matches (TENANT scope — this is where auto-created profiles live)
-    const existingProfiles = await this.listAllApplicationPortProfilesRaw(zoneId, 'TENANT');
+    const existingId = isIcmp
+      // ICMP has no port content to search by — fall back to our own canonical exact
+      // name (server-side exact-match fast path via lookupPortProfile, 1 call).
+      ? await this.lookupPortProfile(profileName, zoneId, undefined, 'TENANT')
+      // TCP/UDP: search by actual port content — finds any existing profile covering
+      // this exact protocol+port under any name, not just our own naming convention.
+      : (await this.findPortProfileByPortContent(port, normalizedProtocol, zoneId, 'ALL', requireUsableForNAT))?.id;
 
-    // Anchored to the exact trailing "-{port}" segment — see lookupPortProfile for why
-    // an unanchored includes() check is unsafe (e.g. port "1022" vs "CUSTOM-SSH-10220").
-    const existing = existingProfiles.find(
-      p => p.name === profileName || (!isIcmp && p.name.split('-').pop() === port && p.name.toUpperCase().includes(normalizedProtocol))
-    );
-
-    if (existing) {
-      return existing.id;
+    if (existingId) {
+      return existingId;
     }
 
     // Profile doesn't exist — create it
@@ -4699,20 +4753,64 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
   }
 
   /**
-   * Lookup a port profile by name or port number.
-   * Returns the profile URN if found, undefined otherwise.
+   * Lookup a port profile by name or port number. Returns the profile URN if found,
+   * undefined otherwise.
+   *
+   * @param protocol When nameOrPort is a bare port number, require the matched profile to
+   *   actually carry this protocol on the matching port entry — prevents a UDP lookup from
+   *   silently returning an existing TCP profile for the same port number (or vice versa).
+   *   Live collision confirmed in this org: "1022" alone would match "CUSTOM-TCP-1022"
+   *   regardless of what protocol the caller actually wanted. Defaults to TCP.
+   * @param scope Restrict the search to this scope (default 'ALL' — searches both, since
+   *   callers passing an arbitrary name/port can't know ahead of time whether a match is a
+   *   built-in SYSTEM one or a custom TENANT one).
+   * @param requireUsableForNAT Bare-port lookups only — pass true from NAT-rule call sites,
+   *   see getOrCreatePortProfile for why (some SYSTEM profiles that match by port are
+   *   usableForNAT: false).
    */
-  async lookupPortProfile(nameOrPort: string, zoneId?: string): Promise<string | undefined> {
-    const allProfiles = await this.listAllApplicationPortProfilesRaw(zoneId, 'ALL');
+  async lookupPortProfile(
+    nameOrPort: string,
+    zoneId?: string,
+    protocol?: string,
+    scope: 'SYSTEM' | 'TENANT' | 'ALL' = 'ALL',
+    requireUsableForNAT: boolean = false
+  ): Promise<string | undefined> {
+    const isBarePort = /^\d+$/.test(nameOrPort);
 
-    // Try exact name match first
-    let match = allProfiles.find(p => p.name === nameOrPort);
-    if (match) return match.id;
+    if (isBarePort) {
+      // Search by actual port content, not by name — see findPortProfileByPortContent for
+      // why this finds real matches (e.g. SYSTEM "SSH" for port 22) that a name-based
+      // heuristic never could.
+      const found = await this.findPortProfileByPortContent(
+        nameOrPort, (protocol || 'TCP').toUpperCase(), zoneId, scope, requireUsableForNAT
+      );
+      return found?.id;
+    }
 
-    // Try port number match (e.g., "1022" matches "CUSTOM-SSH-1022"). Anchored to the
-    // exact trailing "-{port}" segment — an unanchored substring/endsWith check would
-    // match "1022" against "CUSTOM-SSH-10220" too (a real collision seen in this org).
-    match = allProfiles.find(p => p.name.split('-').pop() === nameOrPort);
+    // Exact-name lookups can be pushed server-side — verified live that `name==` on this
+    // endpoint is true equality (unlike applicationPorts.destinationPorts==, which does an
+    // unanchored substring search). Collapses up to 18 paginated calls into 1. Skip when
+    // the name contains FIQL-reserved characters (',' is OR, ';' is AND) that would corrupt
+    // the filter — some SYSTEM profile names contain literal commas (e.g. "Win - RPC, DCOM,
+    // ...") — and fall through to the full scan for those instead.
+    if (!/[,;]/.test(nameOrPort)) {
+      const scopePart = scope !== 'ALL' ? `scope==${scope};` : '';
+      const filter = `${scopePart}name==${nameOrPort}`;
+      const data = await this.makeCloudApiRequest<any>(
+        'GET',
+        `/applicationPortProfiles?filter=${encodeURIComponent(filter)}&page=1&pageSize=25`,
+        zoneId
+      );
+      const values: Array<{ name: string; id: string }> = Array.isArray(data) ? data : (data.values ?? []);
+      const exact = values.find(v => v.name === nameOrPort);
+      // Exact-name search is authoritative — a name either matches or it doesn't, so unlike
+      // the port-number case there's nothing left to find via the full scan.
+      return exact?.id;
+    }
+
+    // Fallback for names containing ',' or ';' only — exact match via full client-side scan.
+    const allProfiles = await this.listAllApplicationPortProfilesRaw(zoneId, scope);
+    const match = allProfiles.find(p => p.name === nameOrPort);
     return match?.id;
   }
 
