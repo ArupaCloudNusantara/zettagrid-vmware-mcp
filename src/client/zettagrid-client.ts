@@ -4483,12 +4483,13 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
   async listApplicationPortProfiles(filter?: string, zoneId?: string): Promise<McpToolResponse<ListResponse<any>>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
-      const scope = filter?.toUpperCase() ?? 'ALL';
-      const filterParam = scope === 'ALL' ? '' : `?filter=scope==${scope}`;
-      const data = await this.makeCloudApiRequest<any>('GET', `/applicationPortProfiles${filterParam}`, zoneId);
-      const items: any[] = Array.isArray(data) ? data : (data.values ?? data.resultTotal !== undefined ? data.values ?? [] : []);
+      const scope = (filter?.toUpperCase() ?? 'ALL') as 'SYSTEM' | 'TENANT' | 'ALL';
+      // Was previously a single unpaginated request (no page/pageSize params) — silently
+      // truncated to the server's default 25 results for any scope with more than that
+      // (SYSTEM has 415+ here). listAllApplicationPortProfilesRaw already paginates fully.
+      const items = await this.listAllApplicationPortProfilesRaw(zoneId, scope);
       return this.formatMcpResponse(
-        { items, total: data.resultTotal ?? items.length, page: 1, pageSize: items.length, hasMore: false } as ListResponse<any>,
+        { items, total: items.length, page: 1, pageSize: items.length, hasMore: false } as ListResponse<any>,
         zone
       );
     } catch (error) {
@@ -4593,18 +4594,18 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
   private async listAllApplicationPortProfilesRaw(
     zoneId?: string,
     scopeFilter?: 'SYSTEM' | 'TENANT' | 'ALL'
-  ): Promise<Array<{ name: string; id: string }>> {
+  ): Promise<any[]> {
     const filterQuery = scopeFilter && scopeFilter !== 'ALL' ? `filter=scope==${scopeFilter}&` : '';
     const pageSize = 25;
     let page = 1;
-    let all: Array<{ name: string; id: string }> = [];
+    let all: any[] = [];
     for (let guard = 0; guard < 50; guard++) {
       const data = await this.makeCloudApiRequest<any>(
         'GET',
         `/applicationPortProfiles?${filterQuery}page=${page}&pageSize=${pageSize}`,
         zoneId
       );
-      const values: Array<{ name: string; id: string }> = Array.isArray(data) ? data : (data.values ?? []);
+      const values: any[] = Array.isArray(data) ? data : (data.values ?? []);
       all = all.concat(values);
       const total = data?.resultTotal ?? all.length;
       if (values.length === 0 || all.length >= total) break;
@@ -4709,47 +4710,31 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
     const vdcUrn = vdcId.startsWith('urn:vcloud:') ? vdcId : `urn:vcloud:vdc:${vdcId}`;
 
-    // Create the profile
-    const orgListResp = await this.makeRequest<string>(
-      { method: 'GET', url: '/query', params: { type: 'organization' } },
+    // Delegate the actual creation to createApplicationPortProfile — it already resolves
+    // the org URN and handles the ICMP "omit destinationPorts" payload rule correctly;
+    // no need to duplicate either here.
+    const createResult = await this.createApplicationPortProfile(
+      profileName,
+      vdcUrn,
+      [{ protocol: normalizedProtocol, destinationPorts: isIcmp ? [] : [port] }],
       zoneId
     );
-    const orgs = parseOrganizationRecords(orgListResp.data);
-    const rawOrgId = orgs[0]?.id || '';
-    const orgUrn = rawOrgId.startsWith('urn:vcloud:org:') ? rawOrgId : `urn:vcloud:org:${rawOrgId}`;
-
-    const createPayload = {
-      name: profileName,
-      scope: 'TENANT',
-      contextEntityId: vdcUrn,
-      orgRef: { id: orgUrn },
-      applicationPorts: [
-        isIcmp
-          ? { protocol: normalizedProtocol }
-          : { protocol: normalizedProtocol, destinationPorts: [port] },
-      ],
-    };
-
-    await this.makeCloudApiRequest<any>(
-      'POST',
-      '/applicationPortProfiles',
-      zoneId,
-      createPayload
-    );
-
-    // After creation, list again to get the URN (vCD doesn't return it on POST).
-    // Retry with backoff — the new profile may not be immediately queryable.
-    let created: { name: string; id: string } | undefined;
-    for (let attempt = 0; attempt < 4 && !created; attempt++) {
-      if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
-      const profilesAfterCreate = await this.listAllApplicationPortProfilesRaw(zoneId, 'TENANT');
-      created = profilesAfterCreate.find(p => p.name === profileName);
+    if (!createResult.success) {
+      throw new Error(createResult.error?.message || `Failed to create port profile ${profileName}`);
     }
-    if (!created) {
+
+    // vCD doesn't return the URN on POST — retry with backoff, the new profile may not be
+    // immediately queryable. Targeted exact-name lookup, not a full-catalog scan.
+    let createdId: string | undefined;
+    for (let attempt = 0; attempt < 4 && !createdId; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
+      createdId = await this.lookupPortProfile(profileName, zoneId, undefined, 'TENANT');
+    }
+    if (!createdId) {
       throw new Error(`Failed to find created port profile ${profileName}`);
     }
 
-    return created.id;
+    return createdId;
   }
 
   /**
