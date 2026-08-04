@@ -1199,7 +1199,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_application_port_profile',
-          description: 'Create a custom application port profile (tenant-scoped). NOTE: the response data is empty — the URN is NOT returned. After creation call list_application_port_profiles(filter: TENANT) to retrieve the new profile\'s URN. Use list_application_port_profiles first to avoid creating duplicates.',
+          description: 'Create a custom application port profile (tenant-scoped). Returns the created profile including its URN. Use list_application_port_profiles first to avoid creating duplicates.',
           inputSchema: {
             type: 'object',
             properties: {

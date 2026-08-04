@@ -4544,13 +4544,32 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             : { protocol: p.protocol.toUpperCase() }
         )),
       };
-      const data = await this.makeCloudApiRequest<any>(
+      await this.makeCloudApiRequest<any>(
         'POST',
         '/applicationPortProfiles',
         zoneId,
         payload
       );
-      return this.formatMcpResponse(data, zone);
+
+      // vCD creates this resource asynchronously and the POST response body is empty —
+      // retry with backoff to fetch the real created object (URN included) by exact name,
+      // instead of leaving the caller to separately call list_application_port_profiles.
+      let created: any;
+      for (let attempt = 0; attempt < 4 && !created; attempt++) {
+        if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
+        const matches = await this.findApplicationPortProfilesByExactName(name, zoneId, 'TENANT');
+        created = matches[0];
+      }
+      if (!created) {
+        // The create almost certainly succeeded (the POST itself didn't throw) — this means
+        // it just isn't queryable yet, not that it failed. Say so plainly rather than
+        // implying failure.
+        return this.formatMcpResponse({}, zone, {
+          code: 'CREATE_APP_PORT_PROFILE_UNCONFIRMED',
+          message: `Profile '${name}' was created but could not be confirmed queryable after retries — it may still appear shortly. Check list_application_port_profiles(filter: TENANT).`,
+        });
+      }
+      return this.formatMcpResponse(created, zone);
     } catch (error) {
       return this.formatMcpResponse({}, zone, {
         code: 'CREATE_APP_PORT_PROFILE_ERROR',
@@ -4739,19 +4758,37 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     if (!createResult.success) {
       throw new Error(createResult.error?.message || `Failed to create port profile ${profileName}`);
     }
-
-    // vCD doesn't return the URN on POST — retry with backoff, the new profile may not be
-    // immediately queryable. Targeted exact-name lookup, not a full-catalog scan.
-    let createdId: string | undefined;
-    for (let attempt = 0; attempt < 4 && !createdId; attempt++) {
-      if (attempt > 0) await new Promise(r => setTimeout(r, 1500 * attempt));
-      createdId = await this.lookupPortProfile(profileName, zoneId, undefined, 'TENANT');
-    }
+    // createApplicationPortProfile already retries internally to confirm the profile is
+    // queryable and returns the real object (URN included) — no need for a second retry loop.
+    const createdId = createResult.data?.id;
     if (!createdId) {
-      throw new Error(`Failed to find created port profile ${profileName}`);
+      throw new Error(createResult.error?.message || `Failed to create port profile ${profileName}`);
     }
 
     return createdId;
+  }
+
+  /**
+   * Fetch full application port profile objects (not just id/name) matching an exact name,
+   * optionally scoped. Shared by lookupPortProfile's exact-name fast path and
+   * createApplicationPortProfile's post-create confirmation — both need the identical
+   * targeted filter=name==X query, just different projections of the result. Verified live
+   * that name== is true equality on this endpoint (not a substring match).
+   */
+  private async findApplicationPortProfilesByExactName(
+    name: string,
+    zoneId?: string,
+    scope: 'SYSTEM' | 'TENANT' | 'ALL' = 'ALL'
+  ): Promise<any[]> {
+    const scopePart = scope !== 'ALL' ? `scope==${scope};` : '';
+    const filter = `${scopePart}name==${name}`;
+    const data = await this.makeCloudApiRequest<any>(
+      'GET',
+      `/applicationPortProfiles?filter=${encodeURIComponent(filter)}&page=1&pageSize=25`,
+      zoneId
+    );
+    const values: any[] = Array.isArray(data) ? data : (data.values ?? []);
+    return values.filter(v => v.name === name);
   }
 
   /**
@@ -4789,25 +4826,15 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       return found?.id;
     }
 
-    // Exact-name lookups can be pushed server-side — verified live that `name==` on this
-    // endpoint is true equality (unlike applicationPorts.destinationPorts==, which does an
-    // unanchored substring search). Collapses up to 18 paginated calls into 1. Skip when
-    // the name contains FIQL-reserved characters (',' is OR, ';' is AND) that would corrupt
-    // the filter — some SYSTEM profile names contain literal commas (e.g. "Win - RPC, DCOM,
-    // ...") — and fall through to the full scan for those instead.
+    // Exact-name lookups can be pushed server-side — collapses up to 18 paginated calls
+    // into 1. Skip when the name contains FIQL-reserved characters (',' is OR, ';' is AND)
+    // that would corrupt the filter — some SYSTEM profile names contain literal commas
+    // (e.g. "Win - RPC, DCOM, ...") — and fall through to the full scan for those instead.
     if (!/[,;]/.test(nameOrPort)) {
-      const scopePart = scope !== 'ALL' ? `scope==${scope};` : '';
-      const filter = `${scopePart}name==${nameOrPort}`;
-      const data = await this.makeCloudApiRequest<any>(
-        'GET',
-        `/applicationPortProfiles?filter=${encodeURIComponent(filter)}&page=1&pageSize=25`,
-        zoneId
-      );
-      const values: Array<{ name: string; id: string }> = Array.isArray(data) ? data : (data.values ?? []);
-      const exact = values.find(v => v.name === nameOrPort);
+      const matches = await this.findApplicationPortProfilesByExactName(nameOrPort, zoneId, scope);
       // Exact-name search is authoritative — a name either matches or it doesn't, so unlike
       // the port-number case there's nothing left to find via the full scan.
-      return exact?.id;
+      return matches[0]?.id;
     }
 
     // Fallback for names containing ',' or ';' only — exact match via full client-side scan.
