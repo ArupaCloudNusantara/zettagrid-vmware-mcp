@@ -2698,6 +2698,14 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       let portProfiles = firewallRule.portProfiles ?? (firewallRule as any).portProfiles as string[] | undefined;
       const portProfileId = (firewallRule as any).portProfileId as string | undefined;
       const destPortRange = (firewallRule as any).destinationPortRange as string | undefined;
+      // Governs auto-created profiles from a bare port number/range only. Defaults to
+      // 'tcp' (the overwhelmingly common case); pass protocol: 'udp' explicitly for UDP.
+      // ICMP has no port concept, so bare-port auto-create rejects it — reference an
+      // existing ICMPv4/ICMPv6 profile by name/URN via portProfiles instead.
+      // Anything other than an explicit 'udp'/'icmp' (including 'any', unset, or an
+      // unrecognized value) defaults to TCP — the vast majority of use cases.
+      const requestedProtocolRaw = ((firewallRule as any).protocol || 'tcp').toLowerCase();
+      const requestedProtocol = requestedProtocolRaw === 'udp' || requestedProtocolRaw === 'icmp' ? requestedProtocolRaw : 'tcp';
 
       // Resolve any non-URN entries (bare port numbers or profile names) to real URNs.
       // Without this, passing e.g. portProfiles: ["1022"] or ["SSH"] silently sent the
@@ -2706,8 +2714,14 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         if (token.startsWith('urn:vcloud:')) return token;
         if (/^\d+$/.test(token)) {
           // Bare port number — reuse an existing profile or auto-create one
+          if (requestedProtocol === 'icmp') {
+            throw new Error(
+              `Bare port number '${token}' can't auto-create an ICMP profile (ICMP has no port number). ` +
+              `Use list_application_port_profiles to find an existing ICMPv4/ICMPv6 profile and pass its name/URN instead.`
+            );
+          }
           const found = await this.lookupPortProfile(token, zoneId);
-          return found || await this.getOrCreatePortProfile(token, 'TCP', undefined, zoneId);
+          return found || await this.getOrCreatePortProfile(token, requestedProtocol.toUpperCase(), undefined, zoneId);
         }
         // Named profile (e.g. "SSH", "CUSTOM-SSH-1022") — must already exist
         const found = await this.lookupPortProfile(token, zoneId);
@@ -2736,12 +2750,18 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         if (resolvedPortProfileId) {
           portProfiles.push(resolvedPortProfileId);
         } else if (destPortRange && destPortRange !== 'Any') {
+          if (requestedProtocol === 'icmp') {
+            throw new Error(
+              `destinationPortRange '${destPortRange}' can't auto-create an ICMP profile (ICMP has no port number). ` +
+              `Use list_application_port_profiles to find an existing ICMPv4/ICMPv6 profile and pass its name/URN via portProfiles instead.`
+            );
+          }
           // Parse port range (e.g., "1022" or "1022-1025")
           const portStr = destPortRange.split(',')[0]?.trim() || ''; // Take first port if range
           if (portStr && /^\d+(-\d+)?$/.test(portStr)) {
             const port = portStr.split('-')[0] || ''; // Use start of range
             if (port) {
-              const profileId = await this.getOrCreatePortProfile(port, 'TCP', undefined, zoneId);
+              const profileId = await this.getOrCreatePortProfile(port, requestedProtocol.toUpperCase(), undefined, zoneId);
               portProfiles.push(profileId);
             }
           }
@@ -3387,6 +3407,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       applicationPortProfileId?: string;
       applicationPortProfileName?: string;
       firewallMatch?: string;
+      protocol?: string;
     },
     zoneId?: string
   ): Promise<McpToolResponse<any>> {
@@ -3416,16 +3437,30 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         profileId = resolved;
       }
 
-      // Auto-lookup or create port profile if user specified a port number or name
+      // Auto-lookup or create port profile if user specified a port number or name.
+      // protocol defaults to 'tcp' — that covers the vast majority of NAT use cases
+      // (SSH, HTTP/S, custom TCP services); pass protocol: 'udp' explicitly for UDP
+      // services. ICMP has no port concept, so it's not meaningful for internalPort
+      // auto-create — reference an existing ICMP profile via applicationPortProfileId/Name.
+      // Anything other than an explicit 'udp'/'icmp' (unset or an unrecognized value)
+      // defaults to TCP — the vast majority of use cases.
+      const requestedProtocolRaw = (natRule.protocol || 'tcp').toLowerCase();
+      const requestedProtocol = requestedProtocolRaw === 'udp' || requestedProtocolRaw === 'icmp' ? requestedProtocolRaw : 'tcp';
+      if (natRule.internalPort && !profileId && requestedProtocol === 'icmp') {
+        throw new Error(
+          `internalPort auto-create doesn't support ICMP (ICMP has no port number). ` +
+          `Use list_application_port_profiles to find an existing ICMPv4/ICMPv6 profile and pass its URN via applicationPortProfileId.`
+        );
+      }
       if (natRule.internalPort && !profileId) {
-        // User specified internalPort number — auto-create/lookup "SSH" or CUSTOM-TCP-{port}
-        if (natRule.internalPort === '22') {
+        // User specified internalPort number — auto-create/lookup "SSH" or CUSTOM-{PROTOCOL}-{port}
+        if (natRule.internalPort === '22' && requestedProtocol === 'tcp') {
           // Use standard SSH profile
           const sshProfile = await this.lookupPortProfile('SSH', zoneId);
           profileId = sshProfile || await this.getOrCreatePortProfile(natRule.internalPort, 'TCP', undefined, zoneId);
         } else {
           // Create custom profile for this port
-          profileId = await this.getOrCreatePortProfile(natRule.internalPort, 'TCP', undefined, zoneId);
+          profileId = await this.getOrCreatePortProfile(natRule.internalPort, requestedProtocol.toUpperCase(), undefined, zoneId);
         }
         profileName = profileId.split(':').pop();
       } else if (natRule.applicationPortProfileName && !profileId) {
@@ -4489,10 +4524,13 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         scope: 'TENANT',
         contextEntityId,
         orgRef: { id: orgUrn },
-        applicationPorts: ports.map(p => ({
-          protocol: p.protocol.toUpperCase(),
-          destinationPorts: p.destinationPorts,
-        })),
+        // ICMP entries take no destinationPorts (ICMP has no port concept) — omit the
+        // key entirely rather than sending an empty array, which vCD rejects with HTTP 500.
+        applicationPorts: ports.map(p => (
+          p.destinationPorts && p.destinationPorts.length > 0
+            ? { protocol: p.protocol.toUpperCase(), destinationPorts: p.destinationPorts }
+            : { protocol: p.protocol.toUpperCase() }
+        )),
       };
       const data = await this.makeCloudApiRequest<any>(
         'POST',
@@ -4582,7 +4620,10 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     vdcId?: string,
     zoneId?: string
   ): Promise<string> {
-    const profileName = `CUSTOM-${protocol.toUpperCase()}-${port}`;
+    // ICMP has no port concept — one profile per ICMP version, not per port.
+    const isIcmp = /^icmp/i.test(protocol);
+    const normalizedProtocol = isIcmp ? (/6$/.test(protocol) ? 'ICMPv6' : 'ICMPv4') : protocol.toUpperCase();
+    const profileName = isIcmp ? `CUSTOM-${normalizedProtocol}` : `CUSTOM-${normalizedProtocol}-${port}`;
 
     // List existing profiles to see if one matches (TENANT scope — this is where auto-created profiles live)
     const existingProfiles = await this.listAllApplicationPortProfilesRaw(zoneId, 'TENANT');
@@ -4590,7 +4631,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     // Anchored to the exact trailing "-{port}" segment — see lookupPortProfile for why
     // an unanchored includes() check is unsafe (e.g. port "1022" vs "CUSTOM-SSH-10220").
     const existing = existingProfiles.find(
-      p => p.name === profileName || (p.name.split('-').pop() === port && p.name.toUpperCase().includes(protocol.toUpperCase()))
+      p => p.name === profileName || (!isIcmp && p.name.split('-').pop() === port && p.name.toUpperCase().includes(normalizedProtocol))
     );
 
     if (existing) {
@@ -4629,10 +4670,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       contextEntityId: vdcUrn,
       orgRef: { id: orgUrn },
       applicationPorts: [
-        {
-          protocol: protocol.toUpperCase(),
-          destinationPorts: [port],
-        },
+        isIcmp
+          ? { protocol: normalizedProtocol }
+          : { protocol: normalizedProtocol, destinationPorts: [port] },
       ],
     };
 

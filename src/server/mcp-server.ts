@@ -411,7 +411,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_firewall_rule',
-          description: 'Create an NSX-T firewall rule on an edge gateway. Required fields: edgeGatewayId, name, policy ("allow" or "drop"). **SIMPLIFIED**: Pass destinationPortRange (e.g. "1022" or "8080-8090") and the tool auto-creates the application port profile if needed — no manual profile creation. Alternatively, pass portProfiles with URNs or profile names for manual control. For DNAT rules, use sourceIp (source public IP) and destinationFirewallGroups (destination gateway group). Example: sourceIp=119.235.223.219, destinationFirewallGroups=[gateway-group-URN], destinationPortRange=1022, policy=allow automatically creates CUSTOM-TCP-1022 and allows traffic from your public IP to that port.',
+          description: 'Create an NSX-T firewall rule on an edge gateway. Required fields: edgeGatewayId, name, policy ("allow" or "drop"). **SIMPLIFIED**: Pass destinationPortRange (e.g. "1022" or "8080-8090") and the tool auto-creates the application port profile if needed — no manual profile creation. Auto-created profiles default to TCP; pass protocol: "udp" explicitly for UDP services (e.g. DNS, syslog). ICMP has no port number, so bare destinationPortRange/portProfiles port numbers cannot auto-create an ICMP profile — pre-create one with create_application_port_profile (protocol ICMPv4/ICMPv6) or find an existing one via list_application_port_profiles, then pass its name/URN via portProfiles. Alternatively, pass portProfiles with URNs or profile names for manual control. For DNAT rules, use sourceIp (source public IP) and destinationFirewallGroups (destination gateway group). Example: sourceIp=119.235.223.219, destinationFirewallGroups=[gateway-group-URN], destinationPortRange=1022, policy=allow automatically creates CUSTOM-TCP-1022 and allows traffic from your public IP to that port.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -585,7 +585,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_nat_rule',
-          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP. **SIMPLIFIED**: Pass just internalPort (e.g. "22" for SSH) and the tool auto-creates the application port profile if needed. Or pass applicationPortProfileName to use an existing profile by name. For DNAT: set firewallMatch to MATCH_EXTERNAL_ADDRESS (recommended — matches traffic on the external/public port before NAT; the default MATCH_INTERNAL_ADDRESS matches after NAT and typically mismatches firewall rules keyed on the external port). The applicationPortProfile now auto-creates and manages protocol definitions — no manual profile creation required.',
+          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP. **SIMPLIFIED**: Pass just internalPort (e.g. "22" for SSH) and the tool auto-creates the application port profile if needed. Or pass applicationPortProfileName to use an existing profile by name. Auto-created profiles default to TCP; pass protocol: "udp" explicitly for UDP services (e.g. DNS, syslog). ICMP has no port number, so internalPort auto-create rejects it — find an existing ICMPv4/ICMPv6 profile via list_application_port_profiles and pass its URN via applicationPortProfileId instead. For DNAT: set firewallMatch to MATCH_EXTERNAL_ADDRESS (recommended — matches traffic on the external/public port before NAT; the default MATCH_INTERNAL_ADDRESS matches after NAT and typically mismatches firewall rules keyed on the external port). The applicationPortProfile now auto-creates and manages protocol definitions — no manual profile creation required.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -595,7 +595,8 @@ export class ZettagridMcpServer {
               externalAddresses: { type: 'string', description: 'Public/external IP address (e.g. 203.0.113.1)' },
               internalAddresses: { type: 'string', description: 'Private/internal IP address or subnet (e.g. 192.168.1.10)' },
               externalPort: { type: 'string', description: 'External port number or range (e.g. "80" or "8080-8090"), omit for any' },
-              internalPort: { type: 'string', description: 'Internal destination port number (e.g. "22" for SSH). When specified, auto-creates CUSTOM-TCP-{port} application port profile if it doesn\'t exist — no manual profile creation needed. For SSH use port "22", for HTTP use "80", for HTTPS use "443".' },
+              internalPort: { type: 'string', description: 'Internal destination port number (e.g. "22" for SSH). When specified, auto-creates CUSTOM-{PROTOCOL}-{port} application port profile if it doesn\'t exist — no manual profile creation needed. For SSH use port "22", for HTTP use "80", for HTTPS use "443".' },
+              protocol: { type: 'string', enum: ['tcp', 'udp'], description: 'Protocol for the internalPort auto-created/matched profile (default: tcp). Use "udp" for UDP services. Ignored once applicationPortProfileId/Name is given directly. ICMP is not supported here (no port number) — use applicationPortProfileId with an existing ICMP profile instead.' },
               description: { type: 'string', description: 'Optional description' },
               enabled: { type: 'boolean', description: 'Enable rule immediately (default true)' },
               applicationPortProfileId: { type: 'string', description: 'Application port profile URN (optional — use internalPort instead for auto-creation)' },
@@ -1398,6 +1399,9 @@ export class ZettagridMcpServer {
               portProfileId: args?.portProfileId as string | undefined,
               sourceFirewallGroups: args?.sourceFirewallGroups as string[] | undefined,
               destinationFirewallGroups: args?.destinationFirewallGroups as string[] | undefined,
+              // Governs the protocol of any port profile auto-created from a bare port
+              // number/range (portProfiles entry or destinationPortRange) — default 'tcp'.
+              protocol: args?.protocol as string | undefined,
               protocols: {
                 tcp: args?.protocol === 'tcp' || args?.protocol === 'any',
                 udp: args?.protocol === 'udp' || args?.protocol === 'any',
@@ -1473,6 +1477,7 @@ export class ZettagridMcpServer {
                 internalAddresses: req('internalAddresses'),
                 ...(args?.externalPort !== undefined && { externalPort: args.externalPort as string }),
                 ...(args?.internalPort !== undefined && { internalPort: args.internalPort as string }),
+                ...(args?.protocol !== undefined && { protocol: args.protocol as string }),
                 ...(args?.description !== undefined && { description: args.description as string }),
                 ...(args?.enabled !== undefined && { enabled: args.enabled as boolean }),
                 ...(args?.applicationPortProfileId !== undefined && { applicationPortProfileId: args.applicationPortProfileId as string }),
