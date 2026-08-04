@@ -343,47 +343,60 @@ export class ZettagridClient {
   ): Promise<T> {
     const auth = this.getZoneAuth(zoneId);
     const zoneConfig = this.zoneManager.getZoneConfig(zoneId);
-    await auth.initialize();
-    const authHeaders = await auth.getAuthenticatedHeaders();
+    const globalConfig = this.zoneManager.getConfig();
 
-    // Strip /api suffix, prepend /cloudapi/1.0.0
-    const baseUrl = zoneConfig.apiEndpoint.replace(/\/api$/, '');
-    const url = `${baseUrl}/cloudapi/1.0.0${path}`;
+    try {
+      await auth.initialize();
+      const authHeaders = await auth.getAuthenticatedHeaders();
 
-    const headers: Record<string, string> = {
-      ...authHeaders,
-      'Accept': `application/json;version=${zoneConfig.apiVersion}`,
-    };
-    if (body !== undefined) headers['Content-Type'] = 'application/json';
+      // Strip /api suffix, prepend /cloudapi/1.0.0
+      const baseUrl = zoneConfig.apiEndpoint.replace(/\/api$/, '');
+      const url = `${baseUrl}/cloudapi/1.0.0${path}`;
 
-    const requestInit: RequestInit = {
-      method,
-      headers,
-      signal: AbortSignal.timeout(30000),
-    };
-    if (body !== undefined) requestInit.body = JSON.stringify(body);
-
-    let response = await fetch(url, requestInit);
-
-    // On 401, the server-side session expired — invalidate, re-auth, retry once.
-    if (response.status === 401) {
-      await auth.logout();
-      const freshHeaders = await auth.getAuthenticatedHeaders();
-      requestInit.headers = {
-        ...freshHeaders,
+      const headers: Record<string, string> = {
+        ...authHeaders,
         'Accept': `application/json;version=${zoneConfig.apiVersion}`,
-        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       };
-      response = await fetch(url, requestInit);
-    }
+      if (body !== undefined) headers['Content-Type'] = 'application/json';
 
-    if (!response.ok) {
-      const errText = await response.text().catch(() => '');
-      throw new Error(`CloudAPI ${method} ${path} → HTTP ${response.status}: ${errText.slice(0, 300)}`);
+      const requestInit: RequestInit = {
+        method,
+        headers,
+        signal: AbortSignal.timeout(30000),
+      };
+      if (body !== undefined) requestInit.body = JSON.stringify(body);
+
+      const doFetch = () => this.executeWithRetry(
+        () => fetch(url, requestInit),
+        globalConfig.retryAttempts
+      );
+
+      let response = await doFetch();
+
+      // On 401, the server-side session expired — invalidate, re-auth, retry once.
+      if (response.status === 401) {
+        await auth.logout();
+        const freshHeaders = await auth.getAuthenticatedHeaders();
+        requestInit.headers = {
+          ...freshHeaders,
+          'Accept': `application/json;version=${zoneConfig.apiVersion}`,
+          ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        };
+        response = await doFetch();
+      }
+
+      if (!response.ok) {
+        const errText = await response.text().catch(() => '');
+        throw new Error(`CloudAPI ${method} ${path} → HTTP ${response.status}: ${errText.slice(0, 300)}`);
+      }
+      const text = await response.text();
+      if (!text) return {} as T;
+      try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
+    } catch (error) {
+      throw new Error(
+        `CloudAPI ${method} ${path} failed for zone ${zoneConfig.name}: ${error instanceof Error ? error.message : 'Unknown error'}`
+      );
     }
-    const text = await response.text();
-    if (!text) return {} as T;
-    try { return JSON.parse(text) as T; } catch { return text as unknown as T; }
   }
 
   // === ORGANIZATION METHODS ===
