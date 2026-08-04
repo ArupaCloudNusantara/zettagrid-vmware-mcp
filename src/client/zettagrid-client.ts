@@ -4694,14 +4694,14 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     }
 
     // Profile doesn't exist — create it
-    // Get the VDC ID if not provided
+    // Get the VDC ID if not provided. /admin/extension/virtualDatacenters requires
+    // system/provider-administrator rights this tenant API token doesn't have (confirmed
+    // live: the bare /admin/extension root returns 200 but an empty stub with no links —
+    // no URL under that namespace will work for a tenant credential). /query?type=orgVdc
+    // (via listVdcs, already used elsewhere for this exact purpose) is tenant-accessible.
     if (!vdcId) {
-      const vdcResp = await this.makeRequest<string>(
-        { method: 'GET', url: '/admin/extension/virtualDatacenters' },
-        zoneId
-      );
-      const vdcMatch = /<VirtualDataCenter[^>]*href=".*\/vdc\/([a-f0-9\-]+)"/.exec(vdcResp.data);
-      vdcId = vdcMatch?.[1] || '';
+      const vdcsResp = await this.listVdcs(zoneId);
+      vdcId = vdcsResp.data?.items?.[0]?.id ? String(vdcsResp.data.items[0].id) : '';
     }
 
     if (!vdcId) {
