@@ -2100,7 +2100,16 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           resolvedVmConfigs.forEach(cfg => {
             cfg.networkConnections?.forEach((nc, i) => {
               const templateNet = firstVmTemplateNets[i] ?? firstVmTemplateNets[0]!;
-              if (templateNet && templateNet !== nc.networkName) {
+              // "none" is vCD's reserved placeholder for a disconnected template NIC — not a
+              // real network to remap the requested one to. Treating it as remappable (as this
+              // used to) auto-populates the vApp-level NetworkConfig under the literal name
+              // "none", colliding with vCD's own built-in isolated "none" network (which vCD
+              // silently keeps instead of ours), and rewrites the VM's NIC override to target
+              // "none" too — which then can't accept a real IP allocation mode. Confirmed live:
+              // "Windows Server 2019 Standard Desktop"'s template NIC ships exactly this way
+              // (network="none", IsConnected=false) and previously failed instantiation with
+              // "Unknown IP Addressing Mode ... connected to network 'none'" as a direct result.
+              if (templateNet && templateNet.toLowerCase() !== 'none' && templateNet !== nc.networkName) {
                 networkNameMap.set(nc.networkName, templateNet);
               }
             });
@@ -2228,11 +2237,30 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         const isCloudInitTemplate = this.isCloudInitTemplate(cfg?.ovfProperties);
         const hasPoolOrManualMode = cfg?.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
-        if (!isCloudInitTemplate && hasPoolOrManualMode) {
+        if (!isCloudInitTemplate && hasPoolOrManualMode && taskId) {
           // Enable guest customization for non-cloud-init templates that need IP configuration
           const vmName = cfg?.vmName || (templateVms.length === 1 ? vappName : `${vappName}-1`);
-          // Fire async (don't await) so we return immediately; vCD will accept the update while task runs
-          this.enableVmGuestCustomization(vmHref, vmName, zoneId).catch(e => {
+          // Fire async (don't await) so we return immediately, but wait for the instantiate task to
+          // actually finish before PUTing GuestCustomizationSection. PUTing immediately races vCD's
+          // own async provisioning of the VM's resource-allocation section — confirmed live: it 400s
+          // with "validation error on field '<cpuResourceMhz|memoryResourceMb|...>': may not be null",
+          // a DIFFERENT field each time depending on exactly how far provisioning had gotten, which is
+          // the signature of a race rather than a real payload defect.
+          // Also pass the bare vmId (already extracted above), not vmHref — enableVmGuestCustomization
+          // builds its own /vApp/vm-{id} URL and only strips a urn:vcloud:vm: prefix, never an href, so
+          // passing the full href doubled up the path (vm-https://.../vApp/vm-...) and 400'd every time
+          // this branch fired; that failure was invisible too, only logged, never surfaced to the caller.
+          (async () => {
+            const deadline = Date.now() + 120_000;
+            let t = await this.getTask(taskId, zoneId);
+            while (Date.now() < deadline && t.data?.taskStatus !== 'success' && t.data?.taskStatus !== 'error') {
+              await new Promise(r => setTimeout(r, 3000));
+              if (Date.now() >= deadline) break;
+              t = await this.getTask(taskId, zoneId);
+            }
+            if (t.data?.taskStatus !== 'success') return;
+            await this.enableVmGuestCustomization(vmId, vmName, zoneId);
+          })().catch(e => {
             console.error('Post-deployment guest customization update failed (continuing anyway)', e);
           });
         }
@@ -2506,10 +2534,27 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         const isCloudInitTemplate = this.isCloudInitTemplate(configForXml.ovfProperties);
         const hasPoolOrManualMode = configForXml.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
-        if (!isCloudInitTemplate && hasPoolOrManualMode) {
-          // Enable guest customization for non-cloud-init templates that need IP configuration
-          // Fire async (don't await) so we return immediately
-          this.enableVmGuestCustomization(firstHref, vmName, zoneId).catch(e => {
+        if (!isCloudInitTemplate && hasPoolOrManualMode && task.taskId) {
+          // firstHref is the SOURCE TEMPLATE's own VM href (used above as the recomposeVApp
+          // Source), never the newly-created VM's — recomposeVApp's response is only a Task,
+          // it doesn't hand back the new VM's href the way instantiateVAppTemplate does. Wait
+          // for the recompose to finish, then look the new VM up by name to get its real id.
+          // Fire async (don't await) so we return immediately.
+          (async () => {
+            const deadline = Date.now() + 120_000;
+            let t = await this.getTask(task.taskId, zoneId);
+            while (Date.now() < deadline && t.data?.taskStatus !== 'success' && t.data?.taskStatus !== 'error') {
+              await new Promise(r => setTimeout(r, 3000));
+              if (Date.now() >= deadline) break;
+              t = await this.getTask(task.taskId, zoneId);
+            }
+            if (t.data?.taskStatus !== 'success') return;
+            const vms = await this.listVMs(vappId, zoneId);
+            const newVm = vms.data?.items?.find(v => v.name === vmName);
+            if (newVm?.id) {
+              await this.enableVmGuestCustomization(newVm.id, vmName, zoneId);
+            }
+          })().catch(e => {
             console.error('Post-deployment guest customization update failed (continuing anyway)', e);
           });
         }
