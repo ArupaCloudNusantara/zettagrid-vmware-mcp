@@ -2243,14 +2243,19 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       // Expose bare taskId at top level so callers can poll with get_task without parsing the href
       const taskId   = taskHref.split('/task/')[1] || '';
 
-      // For non-cloud-init templates with POOL/MANUAL IP mode, enable guest customization post-deployment
-      // This works around vCD not respecting instantiation-time NeedsCustomization for Linux VMs
+      // For non-cloud-init templates with POOL/MANUAL IP mode, enable guest customization post-deployment.
+      // Only when the caller explicitly passed guestCustomization — this workaround only ever forces
+      // Enabled=true and ComputerName, and live testing (Windows 2016/2019/2022/2025) confirmed both
+      // already apply correctly from instantiation-time settings alone. Firing it unconditionally was
+      // the sole source of a race with the caller's own follow-up operations (power-on, etc.) — see
+      // bug_enable_guest_customization_races_and_wrong_vm memory. If a caller doesn't ask for a guest
+      // customization override, there's nothing here for this step to enforce.
       if (vmHref && resolvedVmConfigs.length > 0) {
         const cfg = resolvedVmConfigs[0];
         const isCloudInitTemplate = this.isCloudInitTemplate(cfg?.ovfProperties);
         const hasPoolOrManualMode = cfg?.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
-        if (!isCloudInitTemplate && hasPoolOrManualMode && taskId) {
+        if (!isCloudInitTemplate && hasPoolOrManualMode && cfg?.guestCustomization !== undefined && taskId) {
           // Enable guest customization for non-cloud-init templates that need IP configuration
           const vmName = cfg?.vmName || (templateVms.length === 1 ? vappName : `${vappName}-1`);
           // Fire async (don't await) so we return immediately, but wait for the instantiate task to
@@ -2542,12 +2547,14 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
       const task = parseTaskResponse(response.data as unknown as string);
 
-      // For non-cloud-init templates with POOL/MANUAL IP mode, enable guest customization post-deployment
+      // For non-cloud-init templates with POOL/MANUAL IP mode, enable guest customization post-deployment.
+      // Only when the caller explicitly passed guestCustomization — see the matching comment in
+      // createVApp for why this is now gated instead of firing unconditionally.
       if (configForXml && firstHref) {
         const isCloudInitTemplate = this.isCloudInitTemplate(configForXml.ovfProperties);
         const hasPoolOrManualMode = configForXml.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
-        if (!isCloudInitTemplate && hasPoolOrManualMode && task.taskId) {
+        if (!isCloudInitTemplate && hasPoolOrManualMode && configForXml.guestCustomization !== undefined && task.taskId) {
           // firstHref is the SOURCE TEMPLATE's own VM href (used above as the recomposeVApp
           // Source), never the newly-created VM's — recomposeVApp's response is only a Task,
           // it doesn't hand back the new VM's href the way instantiateVAppTemplate does. Wait
