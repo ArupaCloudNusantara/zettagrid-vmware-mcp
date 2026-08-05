@@ -984,9 +984,10 @@ export class ZettagridClient {
       }, zoneId);
 
       const currentXml = getResp.data as unknown as string;
+      const escapedComputerName = xmlEscape(computerName);
       const updatedXml = currentXml.includes('<ComputerName>')
-        ? currentXml.replace(/<ComputerName>[^<]*<\/ComputerName>/, `<ComputerName>${computerName}</ComputerName>`)
-        : currentXml.replace('</GuestCustomizationSection>', `    <ComputerName>${computerName}</ComputerName>\n</GuestCustomizationSection>`);
+        ? currentXml.replace(/<ComputerName>[^<]*<\/ComputerName>/, `<ComputerName>${escapedComputerName}</ComputerName>`)
+        : currentXml.replace('</GuestCustomizationSection>', `    <ComputerName>${escapedComputerName}</ComputerName>\n</GuestCustomizationSection>`);
 
       const putResp = await this.makeRequest<string>({
         method: 'PUT',
@@ -1134,8 +1135,8 @@ export class ZettagridClient {
   private buildVAppInstantiationParamsXml(params?: VAppInstantiationParams): string {
     if (!params?.networkConfig?.length) return '';
     const configs = params.networkConfig.map(nc => {
-      const parent = nc.parentNetworkHref ? `<ParentNetwork href="${nc.parentNetworkHref}" />` : '';
-      return `<NetworkConfig networkName="${nc.networkName}">
+      const parent = nc.parentNetworkHref ? `<ParentNetwork href="${xmlEscape(nc.parentNetworkHref)}" />` : '';
+      return `<NetworkConfig networkName="${xmlEscape(nc.networkName)}">
             <Configuration>
                 ${parent}
                 <FenceMode>${nc.fenceMode}</FenceMode>
@@ -1602,12 +1603,12 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       const nics = vmConfig.networkConnections.map((nc, i) => {
         const idx = nc.index ?? i;
         const resolvedMode = nc.ipMode ?? 'POOL';
-        const ipLine = resolvedMode === 'MANUAL' && nc.ipAddress ? `<IpAddress>${nc.ipAddress}</IpAddress>` : '';
+        const ipLine = resolvedMode === 'MANUAL' && nc.ipAddress ? `<IpAddress>${xmlEscape(nc.ipAddress)}</IpAddress>` : '';
         // NetworkAdapterType must be the LAST child of NetworkConnection (after
         // IpAddressAllocationMode/SecondaryIpAddressAllocationMode) — confirmed via live
         // vCD response inspection, not documented anywhere obvious.
         const adapterLine = nc.adapterType ? `<NetworkAdapterType>${nc.adapterType}</NetworkAdapterType>` : '';
-        return `<NetworkConnection network="${nc.networkName}">
+        return `<NetworkConnection network="${xmlEscape(nc.networkName)}">
                 <NetworkConnectionIndex>${idx}</NetworkConnectionIndex>
                 ${ipLine}
                 <IsConnected>true</IsConnected>
@@ -1676,7 +1677,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
     // StorageProfile is a direct child of SourcedItem
     const storageProfileXml = vmConfig.storageProfileHref
-      ? `\n        <StorageProfile href="${vmConfig.storageProfileHref}" type="application/vnd.vmware.vcloud.vdcStorageProfile+xml" name="${vmConfig.storageProfileName ?? ''}" />`
+      ? `\n        <StorageProfile href="${xmlEscape(vmConfig.storageProfileHref)}" type="application/vnd.vmware.vcloud.vdcStorageProfile+xml" name="${xmlEscape(vmConfig.storageProfileName ?? '')}" />`
       : '';
 
     // CPU/memory/disk cannot be set during instantiateVAppTemplate.
@@ -1690,7 +1691,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     // silently ignored and the VM stays on its template-original network (e.g. "VM Network"),
     // which typically doesn't exist as a network in the target vApp/VDC.
     const networkAssignmentsXml = (networkAssignments ?? [])
-      .map(a => `\n        <NetworkAssignment innerNetwork="${a.innerNetwork}" containerNetwork="${a.containerNetwork}"/>`)
+      .map(a => `\n        <NetworkAssignment innerNetwork="${xmlEscape(a.innerNetwork)}" containerNetwork="${xmlEscape(a.containerNetwork)}"/>`)
       .join('');
 
     return `
@@ -4123,9 +4124,10 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           .replace(/(<rasd:VirtualQuantity>)\d+(<\/rasd:VirtualQuantity>)/, `$1${diskSizeBytes}$2`);
 
         if (storageProfileHref) {
+          const escapedHref = xmlEscape(storageProfileHref);
           newItem = /\w+:storageProfileHref="[^"]*"/.test(newItem)
-            ? newItem.replace(/\w+:storageProfileHref="[^"]*"/, `${capacityPrefix}:storageProfileHref="${storageProfileHref}"`)
-            : newItem.replace(/(\w+:capacity="\d+")/, `${capacityPrefix}:storageProfileHref="${storageProfileHref}" $1`);
+            ? newItem.replace(/\w+:storageProfileHref="[^"]*"/, `${capacityPrefix}:storageProfileHref="${escapedHref}"`)
+            : newItem.replace(/(\w+:capacity="\d+")/, `${capacityPrefix}:storageProfileHref="${escapedHref}" $1`);
         }
 
         // Insert right after the template item — RasdItemsList has no elements after the
@@ -4377,11 +4379,11 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           throw new Error(`NIC index ${newIndex} already exists — pass a different nicIndex, or omit nicIndex to auto-assign the next available one.`);
         }
         const resolvedMode = update.ipMode ?? 'POOL';
-        const ipLine = resolvedMode === 'MANUAL' && update.ipAddress ? `<IpAddress>${update.ipAddress}</IpAddress>` : '';
+        const ipLine = resolvedMode === 'MANUAL' && update.ipAddress ? `<IpAddress>${xmlEscape(update.ipAddress)}</IpAddress>` : '';
         // NetworkAdapterType must be the LAST child of NetworkConnection — confirmed via live
         // vCD response inspection (same ordering buildSourcedItemXml's NIC template follows).
         const adapterLine = update.adapterType ? `<NetworkAdapterType>${update.adapterType}</NetworkAdapterType>` : '';
-        const newNicXml = `<NetworkConnection network="${update.networkName}">
+        const newNicXml = `<NetworkConnection network="${xmlEscape(update.networkName)}">
                 <NetworkConnectionIndex>${newIndex}</NetworkConnectionIndex>
                 ${ipLine}
                 <IsConnected>true</IsConnected>
@@ -4444,7 +4446,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       if (update.networkName) {
         updatedNc = updatedNc.replace(
           /(<NetworkConnection\b[^>]*\bnetwork=")[^"]*(")/,
-          `$1${update.networkName}$2`
+          `$1${xmlEscape(update.networkName)}$2`
         );
       }
 
@@ -4459,10 +4461,11 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       }
 
       if (update.ipAddress) {
+        const escapedIp = xmlEscape(update.ipAddress);
         if (updatedNc.includes('<IpAddress>')) {
-          updatedNc = updatedNc.replace(/<IpAddress>[^<]*<\/IpAddress>/, `<IpAddress>${update.ipAddress}</IpAddress>`);
+          updatedNc = updatedNc.replace(/<IpAddress>[^<]*<\/IpAddress>/, `<IpAddress>${escapedIp}</IpAddress>`);
         } else {
-          updatedNc = updatedNc.replace('<IsConnected>', `<IpAddress>${update.ipAddress}</IpAddress>\n                <IsConnected>`);
+          updatedNc = updatedNc.replace('<IsConnected>', `<IpAddress>${escapedIp}</IpAddress>\n                <IsConnected>`);
         }
       }
 

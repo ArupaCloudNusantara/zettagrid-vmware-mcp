@@ -247,6 +247,23 @@ const XMLNS_PREFIXES = new Set([
 ]);
 
 /**
+ * Inverse of the write-side xmlEscape() in zettagrid-client.ts — decodes XML entities back to
+ * literal characters when reading attribute/element values out of vCD's XML responses. Without
+ * this, a value written as e.g. `Str0ng&amp;Pass` round-trips back to callers as the literal
+ * string "Str0ng&amp;Pass" instead of "Str0ng&Pass" — confirmed live via get_vm on a VM created
+ * with a password containing &, ", <, >. &amp; is decoded last so it can't corrupt a
+ * legitimately double-escaped sequence decoded earlier in the chain.
+ */
+function xmlUnescape(value: string): string {
+  return value
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
+/**
  * Parse attributes from a single entity XML element (Vdc, VApp, Vm, ScreenTicket, etc.)
  * Matches the first occurrence of rootTagPattern in xmlString and extracts all attributes.
  * Strips XML namespace declarations (xmlns:*) from the output.
@@ -273,7 +290,7 @@ export function parseEntityAttributes(xmlString: string, rootTagPattern: RegExp)
     } else if (attrValue === 'true' || attrValue === 'false') {
       result[attrName] = attrValue === 'true';
     } else {
-      result[attrName] = attrValue;
+      result[attrName] = xmlUnescape(attrValue);
     }
   }
 
@@ -402,7 +419,7 @@ export function parseProductSectionProperties(xmlString: string): Array<{ key: s
     const attrs = m[1] ?? '';
     const key = attrs.match(/ovf:key="([^"]*)"/)?.[1];
     const value = attrs.match(/ovf:value="([^"]*)"/)?.[1] ?? '';
-    if (key) props.push({ key, value });
+    if (key) props.push({ key: xmlUnescape(key), value: xmlUnescape(value) });
   }
   return props;
 }
