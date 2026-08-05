@@ -11,6 +11,8 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
+import * as yaml from 'js-yaml';
+
 import { ZettagridClient } from '../client/zettagrid-client.js';
 import { McpToolResponse, VdcResourceSummary } from '../types.js';
 
@@ -930,7 +932,7 @@ export class ZettagridMcpServer {
                         diskSizeMB: { type: 'number', description: 'Boot disk size in MB. NOT applied by this call; recorded only. You must call update_vm_disk yourself after creation to actually set it.' },
                         storageProfileHref: { type: 'string', description: 'Storage policy href' },
                         storageProfileName: { type: 'string', description: 'Storage policy name' },
-                        userDataYaml: { type: 'string', description: 'Cloud-init YAML configuration (cloud-init templates only). Pass unencoded YAML starting with "#cloud-config". The MCP server validates it, base64-encodes it, and injects it as the "user-data" OVF property. Cloud-init will decode and apply it at boot.' },
+                        userDataYaml: { type: 'string', description: 'Cloud-init YAML configuration (cloud-init templates only). Pass unencoded YAML starting with "#cloud-config". The MCP server validates it, base64-encodes it, and injects it as the "user-data" OVF property. Cloud-init will decode and apply it at boot. NOTE: a top-level "network:" key is NOT applied from user-data by cloud-init\'s OVF datasource (this is a cloud-init/vCD limitation, not a bug) — the server automatically detects and re-routes it to a separate "network-config" OVF property instead, which is where this datasource actually reads network config from.' },
                         networkConnections: {
                           type: 'array',
                           description: 'VM NIC connections to org VDC networks',
@@ -1643,8 +1645,37 @@ export class ZettagridMcpServer {
                   if (!userDataYaml.trim().startsWith('#cloud-config')) {
                     configErrors.push(`instantiationParams.vmConfigs[${i}].userDataYaml: must start with "#cloud-config"`);
                   } else {
+                    let effectiveUserData = userDataYaml;
+
+                    // A top-level `network:` key here would be silently ignored by cloud-init —
+                    // its OVF datasource reads network config exclusively from a separate
+                    // "network-config" property, never from user-data (confirmed against
+                    // cloud-init's DataSourceOVF source; see bug_cloudinit_network_config_property
+                    // memory). Extract it and route it to network-config ourselves instead of
+                    // letting a user's networking silently do nothing.
+                    try {
+                      const parsed = yaml.load(userDataYaml) as Record<string, any> | undefined;
+                      if (parsed && typeof parsed === 'object' && parsed.network) {
+                        const networkConfigYaml = yaml.dump({ network: parsed.network });
+                        cfg.ovfProperties = cfg.ovfProperties ?? [];
+                        cfg.ovfProperties = (cfg.ovfProperties as any[]).filter((p: any) => p.key !== 'network-config');
+                        cfg.ovfProperties.push({ key: 'network-config', value: Buffer.from(networkConfigYaml).toString('base64') });
+
+                        // Strip network: from what's left of user-data — it would just be dead,
+                        // confusing weight there now that it's been moved.
+                        const { network: _network, ...remaining } = parsed;
+                        effectiveUserData = Object.keys(remaining).length > 0
+                          ? `#cloud-config\n${yaml.dump(remaining)}`
+                          : '#cloud-config\n{}';
+                      }
+                    } catch {
+                      // If parsing fails, fall through and encode userDataYaml verbatim as
+                      // before — cloud-init will surface its own error for genuinely malformed
+                      // YAML; this extraction is a best-effort addition, not a new validation gate.
+                    }
+
                     // Base64-encode and add to ovfProperties
-                    const encoded = Buffer.from(userDataYaml).toString('base64');
+                    const encoded = Buffer.from(effectiveUserData).toString('base64');
                     cfg.ovfProperties = cfg.ovfProperties ?? [];
                     // Remove any existing user-data property
                     cfg.ovfProperties = (cfg.ovfProperties as any[]).filter((p: any) => p.key !== 'user-data');
