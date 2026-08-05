@@ -1538,13 +1538,26 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         );
       }
 
-      // PUT the updated section back
-      await this.makeRequest({
+      // PUT the updated section back. vCD accepts this as an async VAPP_UPDATE_VM task (same as
+      // updateVMComputerName's identical PUT, which already parses one) — wait for it to finish
+      // before returning, otherwise a caller that powers on right after this resolves can race the
+      // still-in-flight backend reconfigure and get "Unable to perform this action... VAPP_UPDATE_VM".
+      const putResp = await this.makeRequest<string>({
         method: 'PUT',
         url: `/vApp/vm-${vmId}/guestCustomizationSection`,
         data: guestCustomizationXml,
         headers: { 'Content-Type': 'application/vnd.vmware.vcloud.guestCustomizationSection+xml' }
       }, zoneId);
+      const putTask = parseTaskResponse(putResp.data as unknown as string);
+      if (putTask.taskId) {
+        const deadline = Date.now() + 60_000;
+        let t = await this.getTask(putTask.taskId, zoneId);
+        while (Date.now() < deadline && t.data?.taskStatus !== 'success' && t.data?.taskStatus !== 'error') {
+          await new Promise(r => setTimeout(r, 2000));
+          if (Date.now() >= deadline) break;
+          t = await this.getTask(putTask.taskId, zoneId);
+        }
+      }
     } catch (e) {
       // Log but don't fail the overall operation if guest customization update fails
       console.error(`Failed to enable guest customization on VM: ${vmHref}`, e);
