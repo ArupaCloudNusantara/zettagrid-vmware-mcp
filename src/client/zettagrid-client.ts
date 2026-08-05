@@ -27,7 +27,8 @@ import {
   ListResponse,
   VAppInstantiationParams,
   VAppVmConfig,
-  VAppNetworkConnection
+  VAppNetworkConnection,
+  VAppGuestCustomization
 } from '../types.js';
 import {
   parseVdcRecords,
@@ -750,12 +751,23 @@ export class ZettagridClient {
   /**
    * Power on vApp
    */
-  async powerOnVApp(vAppId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+  async powerOnVApp(vAppId: string, zoneId?: string, forceCustomization?: boolean): Promise<McpToolResponse<any>> {
     try {
-      const response = await this.makeRequest<string>({
-        method: 'POST',
-        url: `/vApp/vapp-${vappUuid(vAppId)}/power/action/powerOn`
-      }, zoneId);
+      // forceCustomization re-runs guest OS customization on power-on even though the VM was
+      // already deployed — needed when guest properties were changed while the VM was powered on
+      // (that PUT alone doesn't re-trigger customization). Requires the deploy action instead of
+      // the plain powerOn action, which has no such option.
+      const response = forceCustomization
+        ? await this.makeRequest<string>({
+            method: 'POST',
+            url: `/vApp/vapp-${vappUuid(vAppId)}/action/deploy`,
+            data: '<?xml version="1.0" encoding="UTF-8"?>\n<DeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5" powerOn="true" forceCustomization="true"/>',
+            headers: { 'Content-Type': 'application/vnd.vmware.vcloud.deployVAppParams+xml' }
+          }, zoneId)
+        : await this.makeRequest<string>({
+            method: 'POST',
+            url: `/vApp/vapp-${vappUuid(vAppId)}/power/action/powerOn`
+          }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
@@ -1012,12 +1024,20 @@ export class ZettagridClient {
   /**
    * Power on VM
    */
-  async powerOnVM(vmId: string, zoneId?: string): Promise<McpToolResponse<any>> {
+  async powerOnVM(vmId: string, zoneId?: string, forceCustomization?: boolean): Promise<McpToolResponse<any>> {
     try {
-      const response = await this.makeRequest<string>({
-        method: 'POST',
-        url: `/vApp/vm-${vmUuid(vmId)}/power/action/powerOn`
-      }, zoneId);
+      // See powerOnVApp for why forceCustomization needs the deploy action instead of powerOn.
+      const response = forceCustomization
+        ? await this.makeRequest<string>({
+            method: 'POST',
+            url: `/vApp/vm-${vmUuid(vmId)}/action/deploy`,
+            data: '<?xml version="1.0" encoding="UTF-8"?>\n<DeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5" powerOn="true" forceCustomization="true"/>',
+            headers: { 'Content-Type': 'application/vnd.vmware.vcloud.deployVAppParams+xml' }
+          }, zoneId)
+        : await this.makeRequest<string>({
+            method: 'POST',
+            url: `/vApp/vm-${vmUuid(vmId)}/power/action/powerOn`
+          }, zoneId);
       return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
     } catch (error) {
       return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
@@ -1586,6 +1606,22 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     );
   }
 
+  /** adminPasswordEnabled: true is only meaningful paired with adminPasswordAuto: true or an
+   *  explicit adminPassword — without one of those, vCD silently forces AdminPasswordEnabled back
+   *  to false on instantiateVAppTemplate (confirmed live 2026-08-05), so the caller's request would
+   *  otherwise be silently dropped with no password configured at all. Returns an error message if
+   *  the combination is invalid, undefined if it's fine. */
+  private validateGuestCustomizationPassword(gc: VAppGuestCustomization | undefined): string | undefined {
+    if (gc?.adminPasswordEnabled === true && gc.adminPasswordAuto !== true && !gc.adminPassword) {
+      return 'guestCustomization.adminPasswordEnabled: true requires either adminPasswordAuto: true ' +
+        '(vCD generates the password — wait for guest OS customization to finish rebooting before ' +
+        'retrieving/using it; checking too early can disrupt the still-running customization and ' +
+        'render the password useless) or an explicit adminPassword value. Without one of these, vCD ' +
+        'silently forces AdminPasswordEnabled back to false and no password gets configured at all.';
+    }
+    return undefined;
+  }
+
   private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string, networkAssignments?: Array<{ innerNetwork: string; containerNetwork: string }>): string {
     const vmName = vmConfig.vmName ?? fallbackName;
     const instSections: string[] = [];
@@ -1783,6 +1819,17 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         : (instantiationParams?.guestCustomization
             ? [{ guestCustomization: instantiationParams.guestCustomization }]
             : []);
+
+      for (const cfg of effectiveVmConfigs) {
+        const gcError = this.validateGuestCustomizationPassword(cfg.guestCustomization);
+        if (gcError) {
+          return this.formatMcpResponse(
+            { needsClarification: true, vmName: cfg.vmName },
+            zone,
+            { code: 'CLARIFICATION_REQUIRED', message: gcError }
+          );
+        }
+      }
 
       // Lazy-fetch VDC networks once; reused by both auto-discovery and IP-mode resolution
       let cachedNets: Array<{ name: string; href: string; defaultGateway?: string; subnetPrefixLength?: number; availableIps: number; totalIps: number; linkType?: number }> | undefined;
@@ -2256,19 +2303,15 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         const hasPoolOrManualMode = cfg?.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
         if (!isCloudInitTemplate && hasPoolOrManualMode && cfg?.guestCustomization !== undefined && taskId) {
-          // Enable guest customization for non-cloud-init templates that need IP configuration
+          // Enable guest customization for non-cloud-init templates that need IP configuration.
+          // AWAITED (not fire-and-forget) — guest customization must finish before the VM is powered
+          // on: powering on while it's still being applied can disrupt the in-progress customization
+          // and leave it in a broken state (e.g. an auto-generated password that never actually gets
+          // set). Since createVApp never powers the VM on itself (powerOn="false" at instantiation),
+          // awaiting here guarantees customization completes before the caller can possibly power on
+          // in response to this call returning.
           const vmName = cfg?.vmName || (templateVms.length === 1 ? vappName : `${vappName}-1`);
-          // Fire async (don't await) so we return immediately, but wait for the instantiate task to
-          // actually finish before PUTing GuestCustomizationSection. PUTing immediately races vCD's
-          // own async provisioning of the VM's resource-allocation section — confirmed live: it 400s
-          // with "validation error on field '<cpuResourceMhz|memoryResourceMb|...>': may not be null",
-          // a DIFFERENT field each time depending on exactly how far provisioning had gotten, which is
-          // the signature of a race rather than a real payload defect.
-          // Also pass the bare vmId (already extracted above), not vmHref — enableVmGuestCustomization
-          // builds its own /vApp/vm-{id} URL and only strips a urn:vcloud:vm: prefix, never an href, so
-          // passing the full href doubled up the path (vm-https://.../vApp/vm-...) and 400'd every time
-          // this branch fired; that failure was invisible too, only logged, never surfaced to the caller.
-          (async () => {
+          try {
             const deadline = Date.now() + 120_000;
             let t = await this.getTask(taskId, zoneId);
             while (Date.now() < deadline && t.data?.taskStatus !== 'success' && t.data?.taskStatus !== 'error') {
@@ -2276,11 +2319,21 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
               if (Date.now() >= deadline) break;
               t = await this.getTask(taskId, zoneId);
             }
-            if (t.data?.taskStatus !== 'success') return;
-            await this.enableVmGuestCustomization(vmId, vmName, zoneId);
-          })().catch(e => {
+            // PUTing immediately (before the instantiate task settles) races vCD's own async
+            // provisioning of the VM's resource-allocation section — confirmed live: it 400s with
+            // "validation error on field '<cpuResourceMhz|memoryResourceMb|...>': may not be null", a
+            // DIFFERENT field each time depending on exactly how far provisioning had gotten, which is
+            // the signature of a race rather than a real payload defect. Waiting above avoids it.
+            // Also pass the bare vmId (already extracted above), not vmHref — enableVmGuestCustomization
+            // builds its own /vApp/vm-{id} URL and only strips a urn:vcloud:vm: prefix, never an href, so
+            // passing the full href doubled up the path (vm-https://.../vApp/vm-...) and 400'd every time
+            // this branch fired; that failure was invisible too, only logged, never surfaced to the caller.
+            if (t.data?.taskStatus === 'success') {
+              await this.enableVmGuestCustomization(vmId, vmName, zoneId);
+            }
+          } catch (e) {
             console.error('Post-deployment guest customization update failed (continuing anyway)', e);
-          });
+          }
         }
       }
 
@@ -2319,6 +2372,15 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
   ): Promise<McpToolResponse<any>> {
     const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
+      const gcError = this.validateGuestCustomizationPassword(vmConfig?.guestCustomization);
+      if (gcError) {
+        return this.formatMcpResponse(
+          { needsClarification: true, vmName },
+          zone,
+          { code: 'CLARIFICATION_REQUIRED', message: gcError }
+        );
+      }
+
       // Resolve catalogItem href → vAppTemplate href
       if (templateId && templateId.includes('/api/catalogItem/')) {
         try {
@@ -2559,8 +2621,10 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           // Source), never the newly-created VM's — recomposeVApp's response is only a Task,
           // it doesn't hand back the new VM's href the way instantiateVAppTemplate does. Wait
           // for the recompose to finish, then look the new VM up by name to get its real id.
-          // Fire async (don't await) so we return immediately.
-          (async () => {
+          // AWAITED (not fire-and-forget) — guest customization must finish before the VM can be
+          // powered on, same reasoning as createVApp: a caller who only polls the main task and
+          // powers on as soon as IT succeeds could otherwise race this still-running sub-step.
+          try {
             const deadline = Date.now() + 120_000;
             let t = await this.getTask(task.taskId, zoneId);
             while (Date.now() < deadline && t.data?.taskStatus !== 'success' && t.data?.taskStatus !== 'error') {
@@ -2568,15 +2632,16 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
               if (Date.now() >= deadline) break;
               t = await this.getTask(task.taskId, zoneId);
             }
-            if (t.data?.taskStatus !== 'success') return;
-            const vms = await this.listVMs(vappId, zoneId);
-            const newVm = vms.data?.items?.find(v => v.name === vmName);
-            if (newVm?.id) {
-              await this.enableVmGuestCustomization(newVm.id, vmName, zoneId);
+            if (t.data?.taskStatus === 'success') {
+              const vms = await this.listVMs(vappId, zoneId);
+              const newVm = vms.data?.items?.find(v => v.name === vmName);
+              if (newVm?.id) {
+                await this.enableVmGuestCustomization(newVm.id, vmName, zoneId);
+              }
             }
-          })().catch(e => {
+          } catch (e) {
             console.error('Post-deployment guest customization update failed (continuing anyway)', e);
-          });
+          }
         }
       }
 

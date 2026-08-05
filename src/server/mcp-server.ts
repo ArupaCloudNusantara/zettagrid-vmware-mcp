@@ -308,6 +308,7 @@ export class ZettagridMcpServer {
                 type: 'string',
                 description: 'Virtual machine ID'
               },
+              forceCustomization: { type: 'boolean', description: 'Re-run guest OS customization on power-on even though the VM was already deployed. Guest properties must normally be set BEFORE first power-on — a PUT to guestCustomizationSection while the VM is already powered on does not by itself re-trigger customization. If guest properties were changed after power-on, power the VM off first, then power on with forceCustomization:true to apply them.' },
               waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
               timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: {
@@ -868,6 +869,7 @@ export class ZettagridMcpServer {
             type: 'object',
             properties: {
               vappId: { type: 'string', description: 'vApp ID' },
+              forceCustomization: { type: 'boolean', description: 'Re-run guest OS customization on power-on even though the VM was already deployed. Guest properties must normally be set BEFORE first power-on — a PUT to guestCustomizationSection while the VM is already powered on does not by itself re-trigger customization. If guest properties were changed after power-on, power off first, then power on with forceCustomization:true to apply them.' },
               waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
               timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
@@ -963,7 +965,7 @@ export class ZettagridMcpServer {
                         },
                         guestCustomization: {
                           type: 'object',
-                          description: 'Guest OS customization (Windows VMs / VCD guest tools)',
+                          description: 'Guest OS customization (Windows VMs / VCD guest tools). Most Windows templates already ship with correct defaults — omit this entirely unless you need to override them. If you do set adminPasswordEnabled:true, it must be paired with either adminPasswordAuto:true or an explicit adminPassword — otherwise vCD silently forces it back to false and no password gets configured. Applied and verified before this call returns, so it is always safe to power on immediately after — but if you change guest properties on a VM that is ALREADY powered on, that alone will not re-apply them; power off first, then power on with forceCustomization:true.',
                           properties: {
                             enabled: { type: 'boolean' },
                             computerName: { type: 'string' },
@@ -1368,7 +1370,7 @@ export class ZettagridMcpServer {
             break;
 
           case 'power_on_vm':
-            result = await this.client.powerOnVM(req('vmId'), args?.zoneId as string | undefined);
+            result = await this.client.powerOnVM(req('vmId'), args?.zoneId as string | undefined, args?.forceCustomization as boolean | undefined);
             break;
 
           case 'power_off_vm':
@@ -1614,7 +1616,7 @@ export class ZettagridMcpServer {
             break;
 
           case 'power_on_vapp':
-            result = await this.client.powerOnVApp(req('vappId'), args?.zoneId as string | undefined);
+            result = await this.client.powerOnVApp(req('vappId'), args?.zoneId as string | undefined, args?.forceCustomization as boolean | undefined);
             break;
 
           case 'power_off_vapp':
