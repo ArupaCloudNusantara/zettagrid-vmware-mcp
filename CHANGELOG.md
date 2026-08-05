@@ -6,6 +6,85 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.4.0] — 2026-08-05
+
+Guest customization reliability (Windows and cloud-init), a live user-reported password/XML
+encoding defect, network handling for non-standard templates, and a full rework of the
+application-port-profile auto-lookup/auto-create path.
+
+### Fixed
+- Guest customization for non-cloud-init templates (Windows, older Linux) was silently broken on
+  every `create_vapp`/`add_vm_to_vapp` call using POOL/MANUAL IP mode: the post-deployment enable
+  step built a malformed URL (double-encoded href) and 400'd every time; even after that, it raced
+  the still-running instantiate/recompose task; `add_vm_to_vapp` targeted the *source template's*
+  VM instead of the newly-created one; and it discarded the task its own PUT returned, so a caller
+  powering on immediately after could collide with the still-in-flight backend reconfigure. All
+  failures were invisible to callers (only logged, never surfaced). Also stopped firing this step
+  unconditionally — it's now gated on the caller explicitly requesting a guest-customization
+  override, since instantiation-time settings alone are already sufficient otherwise (confirmed
+  across Windows Server 2016/2019/2022/2025 templates)
+- `create_vapp` failed to instantiate templates whose own template VM ships with a disconnected NIC
+  (`network="none"`, e.g. "Windows Server 2019 Standard Desktop") — the vApp-level network config
+  now auto-populates from the caller's requested `networkConnections` instead of erroring
+- Cloud-init templates (Ubuntu 24.04+) kept guest customization *enabled* when it should be
+  disabled — a prior attempt to fix this by omitting `GuestCustomizationSection` entirely never
+  actually worked, since vCD just falls back to the source template's own default. Now always
+  explicitly sends `Enabled=false` for cloud-init templates
+- Cloud-init network configuration (both the auto-generated netplan config for MANUAL IP mode, and
+  a `network:` key inside a caller-supplied `userDataYaml`) was silently never applied — cloud-init
+  only reads network config from a dedicated `network-config` OVF property, never from `user-data`.
+  Both paths now deliver it correctly; live-verified via console login
+- XML values (passwords, computer names, network/IP fields, storage profile fields, disk hrefs)
+  were never escaped on write and never unescaped on read — a password or other value containing
+  `&`, `<`, `>`, or `"` could produce malformed XML that broke the entire request, or round-trip
+  back through `get_vm` corrupted. Root cause of a real user-reported issue setting an initial
+  Ubuntu VM password
+- `power_on_vapp`'s `forceCustomization` option sent the attribute at the vApp level, which vCD
+  rejects ("Parameter forceCustomization is not supported for vApps") — it's VM-level only; now
+  fans out to each VM in the vApp individually
+- CloudAPI-backed calls (NAT rules, firewall rules, application port profiles) could throw a bare,
+  context-free `fetch failed` with no retry, unlike other API calls — now retries with the same
+  backoff and wraps failures with the endpoint/zone that failed
+- Application port profile auto-lookup/auto-create had a cluster of related defects, found and
+  fixed together: a `pageSize` of 128 the gateway silently rejected; unanchored substring matching
+  that could match the wrong profile by port-number coincidence; hardcoded TCP regardless of the
+  requested protocol; wrong ICMP payload shape; protocol-blind lookup collisions; name-only (not
+  port-content) matching; a 25-item pagination cap that silently truncated larger orgs; duplicated
+  VDC-resolution/creation logic between call sites; a silent "guess a VDC" fallback replaced with a
+  clear error plus a required `vdcId`; and `create_application_port_profile` returning `{}` instead
+  of the created object
+- The suggested-IP helper (used in `CLARIFICATION_REQUIRED` responses) could suggest an IP already
+  allocated to another VM or a DHCP lease — now checks actual network usage first
+- DHCP IP mode requires *both* the DHCP service enabled *and* a pool configured, but validation only
+  checked one — clarification responses now warn when either is missing, and Ubuntu 24.04+ no
+  longer defaults to DHCP as a result
+
+### Added
+- Guest customization password validation: `adminPasswordEnabled: true` now requires either
+  `adminPasswordAuto: true` or an explicit `adminPassword` — without one of these, vCD silently
+  forces it back to `false` and no password gets configured at all. Rejected up front with a clear
+  `CLARIFICATION_REQUIRED` instead of a silent no-op
+- `forceCustomization` option on `power_on_vapp`/`power_on_vm` — re-runs guest OS customization on
+  an already-deployed VM, for when guest properties were changed after the VM was already powered on
+- Ubuntu 24.04+ templates now require explicit `networkConnections`/IP mode in `create_vapp` — the
+  template's embedded network is often not valid in the target VDC, and relying on it silently
+  produced broken deployments. Comes with a suggested-IP helper for the caller to choose from
+- `add_vm_to_vapp` now mirrors `create_vapp`'s network auto-discovery and multi-network
+  `CLARIFICATION_REQUIRED` behavior instead of failing or misconnecting when `networkConnections` is
+  omitted on a vApp with more than one existing network
+- `userDataYaml` field — pass unencoded cloud-init `#cloud-config` YAML directly; the server
+  validates and base64-encodes it automatically, and extracts any top-level `network:` key into the
+  separate `network-config` OVF property it actually needs to land in
+- Validation guardrails: VM creation now requires at least one way to log in (password, SSH key, or
+  `guestCustomization.adminPassword`); NAT/firewall rule requests must specify the port explicitly
+  (via an application port profile or `externalPort`) rather than leaving it ambiguous
+- `get_server_version` tool — package version, build commit, build timestamp, Node version, and
+  platform, for confirming which build is actually running
+- Documented `public-keys` (not `public_keys`) as the correct OVF property name for SSH key
+  injection, and that it must NOT be base64-encoded (unlike `user-data`, which must be)
+
+---
+
 ## [1.3.0] — 2026-07-29
 
 Field-reported defect fixes from a live multi-VM/multi-disk deployment scenario (deploying VMs into an existing vApp with static IPs and per-VM storage/network requirements). 149/149 integration tests passing (up from 133 in 1.2.0).

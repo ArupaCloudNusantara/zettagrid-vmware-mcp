@@ -1,6 +1,6 @@
 {
   "name": "@zettagrid/vmware-mcp",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Zettagrid VMware MCP Server - Comprehensive tenant organization management across Australian and Indonesian zones",
   "type": "module",
   "main": "build/index.js",
