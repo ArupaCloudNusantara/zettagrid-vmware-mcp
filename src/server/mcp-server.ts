@@ -869,8 +869,8 @@ export class ZettagridMcpServer {
             type: 'object',
             properties: {
               vappId: { type: 'string', description: 'vApp ID' },
-              forceCustomization: { type: 'boolean', description: 'Re-run guest OS customization on power-on even though the VM was already deployed. Guest properties must normally be set BEFORE first power-on — a PUT to guestCustomizationSection while the VM is already powered on does not by itself re-trigger customization. If guest properties were changed after power-on, power off first, then power on with forceCustomization:true to apply them.' },
-              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              forceCustomization: { type: 'boolean', description: 'Re-run guest OS customization on power-on even though the VM was already deployed. Guest properties must normally be set BEFORE first power-on — a PUT to guestCustomizationSection while the VM is already powered on does not by itself re-trigger customization. If guest properties were changed after power-on, power off first, then power on with forceCustomization:true to apply them. vCD only supports this attribute at the VM level (not the vApp level), so when true this powers each VM in the vApp on individually and returns data.vmTasks (an array of per-VM results) instead of a single taskId — waitForTask does not apply in this mode, poll each vmTasks[].taskId yourself via get_task.' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself. Not applicable when forceCustomization:true — see forceCustomization.' },
               timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },

@@ -752,25 +752,34 @@ export class ZettagridClient {
    * Power on vApp
    */
   async powerOnVApp(vAppId: string, zoneId?: string, forceCustomization?: boolean): Promise<McpToolResponse<any>> {
+    const zone = zoneId || this.zoneManager.getConfig().defaultZone;
     try {
       // forceCustomization re-runs guest OS customization on power-on even though the VM was
       // already deployed — needed when guest properties were changed while the VM was powered on
-      // (that PUT alone doesn't re-trigger customization). Requires the deploy action instead of
-      // the plain powerOn action, which has no such option.
-      const response = forceCustomization
-        ? await this.makeRequest<string>({
-            method: 'POST',
-            url: `/vApp/vapp-${vappUuid(vAppId)}/action/deploy`,
-            data: '<?xml version="1.0" encoding="UTF-8"?>\n<DeployVAppParams xmlns="http://www.vmware.com/vcloud/v1.5" powerOn="true" forceCustomization="true"/>',
-            headers: { 'Content-Type': 'application/vnd.vmware.vcloud.deployVAppParams+xml' }
-          }, zoneId)
-        : await this.makeRequest<string>({
-            method: 'POST',
-            url: `/vApp/vapp-${vappUuid(vAppId)}/power/action/powerOn`
-          }, zoneId);
-      return this.formatMcpResponse(parseTaskResponse(response.data), zoneId || this.zoneManager.getConfig().defaultZone);
+      // (that PUT alone doesn't re-trigger customization). It's a VM-level-only attribute of
+      // DeployVAppParams — vCD rejects it at the vApp level with "Parameter forceCustomization is
+      // not supported for vApps" (confirmed live). Fan out to each VM's own deploy action instead.
+      if (forceCustomization) {
+        const vms = await this.listVMs(vAppId, zoneId);
+        const vmList = (vms.data?.items ?? []).filter((vm): vm is typeof vm & { id: string } => !!vm.id);
+        if (!vmList.length) {
+          throw new Error('No VMs found in vApp — nothing to power on');
+        }
+        const results = await Promise.all(vmList.map(vm => this.powerOnVM(vm.id, zoneId, true)));
+        return this.formatMcpResponse(
+          {
+            vmTasks: results.map((r, i) => ({ vmId: vmList[i]!.id, vmName: vmList[i]!.name, ...((r as any).data ?? {}) })),
+          },
+          zone
+        );
+      }
+      const response = await this.makeRequest<string>({
+        method: 'POST',
+        url: `/vApp/vapp-${vappUuid(vAppId)}/power/action/powerOn`
+      }, zoneId);
+      return this.formatMcpResponse(parseTaskResponse(response.data), zone);
     } catch (error) {
-      return this.formatMcpResponse({}, zoneId || this.zoneManager.getConfig().defaultZone, {
+      return this.formatMcpResponse({}, zone, {
         code: 'POWER_ON_VAPP_ERROR',
         message: error instanceof Error ? error.message : 'Failed to power on vApp',
         details: error
