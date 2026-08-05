@@ -1557,6 +1557,22 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
    *  network it should be remapped to. Only needed when the two names differ; without a
    *  NetworkAssignment for a differing pair, vCD silently ignores the NIC override and leaves
    *  the VM on its template-original (often nonexistent, in the target VDC) network. */
+  /** Detect whether a VM config's OVF properties indicate a cloud-init template (Ubuntu 24.04+
+   *  and similar) rather than one relying on vCD guest customization. Any of these OVF property
+   *  keys is a strong signal cloud-init owns configuration and vCD guest customization should
+   *  stay out of the way. Single shared source — this exact check used to be copy-pasted
+   *  independently at 5 call sites across createVApp/add_vm_to_vapp; they now all call this. */
+  private isCloudInitTemplate(ovfProperties: Array<{ key: string; value: string }> | undefined): boolean {
+    const ovfPropKeys = ovfProperties?.map(p => p.key) ?? [];
+    return (
+      ovfPropKeys.includes('hostname') ||
+      ovfPropKeys.includes('password') ||
+      ovfPropKeys.includes('instance-id') ||
+      ovfPropKeys.includes('public-keys') ||  // SSH key is strong indicator of cloud-init
+      ovfPropKeys.includes('user-data')       // Explicit user-data confirms cloud-init
+    );
+  }
+
   private buildSourcedItemXml(vmHref: string, vmConfig: VAppVmConfig, fallbackName: string, networkAssignments?: Array<{ innerNetwork: string; containerNetwork: string }>): string {
     const vmName = vmConfig.vmName ?? fallbackName;
     const instSections: string[] = [];
@@ -1568,13 +1584,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
     // For cloud-init templates (detected by presence of cloud-init-specific OVF properties),
     // we disable vCD guest customization and rely on cloud-init's user-data instead.
     // This is more reliable for Ubuntu 24.04+ which uses cloud-init.
-    const ovfPropKeys = vmConfig.ovfProperties?.map(p => p.key) ?? [];
-    const isCloudInitTemplate =
-      ovfPropKeys.includes('hostname') ||
-      ovfPropKeys.includes('password') ||
-      ovfPropKeys.includes('instance-id') ||
-      ovfPropKeys.includes('public-keys') ||  // SSH key is strong indicator of cloud-init
-      ovfPropKeys.includes('user-data');      // Explicit user-data confirms cloud-init
+    const isCloudInitTemplate = this.isCloudInitTemplate(vmConfig.ovfProperties);
 
     // For cloud-init templates with MANUAL IP mode, user-data will handle network configuration.
     // For non-cloud-init templates or DHCP mode, guest customization may still be needed.
@@ -2136,13 +2146,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             : cfg;
 
           // For cloud-init templates with MANUAL IP mode, generate netplan user-data
-          const ovfPropKeys = renamedCfg.ovfProperties?.map(p => p.key) ?? [];
-          const isCloudInitTemplate =
-            ovfPropKeys.includes('hostname') ||
-            ovfPropKeys.includes('password') ||
-            ovfPropKeys.includes('instance-id') ||
-            ovfPropKeys.includes('public-keys') ||
-            ovfPropKeys.includes('user-data');
+          const isCloudInitTemplate = this.isCloudInitTemplate(renamedCfg.ovfProperties);
           if (isCloudInitTemplate && cfg.networkConnections?.length) {
             // Look up the network by its ORIGINAL (real org) name from `cfg`, not `renamedCfg` —
             // renamedCfg's NIC may have been rewritten to the template's internal placeholder
@@ -2221,8 +2225,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       // This works around vCD not respecting instantiation-time NeedsCustomization for Linux VMs
       if (vmHref && resolvedVmConfigs.length > 0) {
         const cfg = resolvedVmConfigs[0];
-        const ovfPropKeys = cfg?.ovfProperties?.map(p => p.key) ?? [];
-        const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id') || ovfPropKeys.includes('public-keys') || ovfPropKeys.includes('user-data');
+        const isCloudInitTemplate = this.isCloudInitTemplate(cfg?.ovfProperties);
         const hasPoolOrManualMode = cfg?.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
         if (!isCloudInitTemplate && hasPoolOrManualMode) {
@@ -2452,8 +2455,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
       // For cloud-init templates with MANUAL IP mode, generate netplan user-data
       let configForXml = finalVmConfig;
-      const ovfPropKeys = configForXml.ovfProperties?.map(p => p.key) ?? [];
-      const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id') || ovfPropKeys.includes('public-keys') || ovfPropKeys.includes('user-data');
+      const isCloudInitTemplate = this.isCloudInitTemplate(configForXml.ovfProperties);
       if (isCloudInitTemplate && configForXml.networkConnections?.length && vdcId) {
         const manualNic = configForXml.networkConnections.find(nc => nc.ipMode === 'MANUAL' && nc.ipAddress);
         if (manualNic && manualNic.ipAddress) {
@@ -2501,8 +2503,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
       // For non-cloud-init templates with POOL/MANUAL IP mode, enable guest customization post-deployment
       if (configForXml && firstHref) {
-        const ovfPropKeys = configForXml.ovfProperties?.map(p => p.key) ?? [];
-        const isCloudInitTemplate = ovfPropKeys.includes('hostname') || ovfPropKeys.includes('password') || ovfPropKeys.includes('instance-id') || ovfPropKeys.includes('public-keys') || ovfPropKeys.includes('user-data');
+        const isCloudInitTemplate = this.isCloudInitTemplate(configForXml.ovfProperties);
         const hasPoolOrManualMode = configForXml.networkConnections?.some(nc => nc.ipMode === 'POOL' || nc.ipMode === 'MANUAL');
 
         if (!isCloudInitTemplate && hasPoolOrManualMode) {
