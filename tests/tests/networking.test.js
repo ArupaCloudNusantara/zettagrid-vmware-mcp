@@ -12,16 +12,43 @@ const cfg       = require('../config');
 const { makeLogger } = require('../logger');
 const { toArray, findInList, get } = require('../helpers');
 
-const log = makeLogger('networking');
+const log = makeLogger('networking.test');
 let client;
 
 // Track IDs created during tests for teardown
 const created = { firewallRuleId: null, firewallRuleName: null, natRuleId: null, portProfileId: null };
 
+// Snapshots before/after tests to verify no leftover rules
+const snapshots = {
+  firewallRulesBefore: [],
+  firewallRulesAfter: [],
+  natRulesBefore: [],
+  natRulesAfter: [],
+};
+
 // Resolved at runtime — overrides placeholder fixtures if real IDs are discovered
 let resolvedEdgeGatewayId = cfg.fixtures.edgeGatewayId;
 let resolvedAppPortProfileId = cfg.fixtures.appPortProfileId;
 let resolvedVdcId = null;
+
+/**
+ * Capture firewall and NAT rule snapshots for verification
+ */
+async function captureRuleSnapshots(label) {
+  try {
+    const fwRules = toArray(await client.call('list_firewall_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
+    const natRules = toArray(await client.call('list_nat_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
+
+    const fwRuleIds = fwRules.map(r => get(r, 'id') || get(r, 'ruleId')).filter(Boolean);
+    const natRuleIds = natRules.map(r => get(r, 'id') || get(r, 'ruleId')).filter(Boolean);
+
+    log.info(`[${label}] Firewall rules: ${fwRuleIds.length}, NAT rules: ${natRuleIds.length}`);
+    return { fwRuleIds, natRuleIds };
+  } catch (e) {
+    log.warn(`Failed to capture rule snapshots (${label}): ${e.message}`);
+    return { fwRuleIds: [], natRuleIds: [] };
+  }
+}
 
 beforeAll(async () => {
   log.separator('Networking Suite — Setup');
@@ -72,6 +99,12 @@ beforeAll(async () => {
   } catch (e) {
     log.warn(`Could not discover VDC: ${e.message}`);
   }
+
+  // Capture initial firewall and NAT rule state for verification
+  log.info('Capturing initial firewall and NAT rule state...');
+  const initialSnapshot = await captureRuleSnapshots('BEFORE');
+  snapshots.firewallRulesBefore = initialSnapshot.fwRuleIds;
+  snapshots.natRulesBefore = initialSnapshot.natRuleIds;
 });
 
 afterAll(async () => {
@@ -98,7 +131,78 @@ afterAll(async () => {
       profileId: created.portProfileId,
     }).catch(e => log.warn(`Teardown port profile delete failed: ${e.message}`));
   }
-  if (client) client.disconnect();
+
+  // Verify firewall and NAT rules before and after are the same
+  log.info('Verifying firewall and NAT rule cleanup...');
+  try {
+    const finalSnapshot = await captureRuleSnapshots('AFTER');
+    snapshots.firewallRulesAfter = finalSnapshot.fwRuleIds;
+    snapshots.natRulesAfter = finalSnapshot.natRuleIds;
+    log.info('Snapshots assigned, proceeding with comparison');
+
+    // Compare snapshots
+    const fwBefore = new Set(snapshots.firewallRulesBefore);
+    const fwAfter = new Set(snapshots.firewallRulesAfter);
+    const natBefore = new Set(snapshots.natRulesBefore);
+    const natAfter = new Set(snapshots.natRulesAfter);
+    log.info('Sets created, filtering leftover/deleted rules');
+
+    let verificationPassed = true;
+
+    // Check for NEW leftover firewall rules (added during test, not cleaned up)
+    const leftoverFwRules = [...fwAfter].filter(id => !fwBefore.has(id));
+    if (leftoverFwRules.length > 0) {
+      log.error(`❌ VERIFICATION FAILED: ${leftoverFwRules.length} NEW leftover firewall rule(s) not cleaned up: ${leftoverFwRules.join(', ')}`);
+      verificationPassed = false;
+    }
+
+    // Check for DELETED firewall rules (test accidentally deleted existing rules)
+    const deletedFwRules = [...fwBefore].filter(id => !fwAfter.has(id));
+    if (deletedFwRules.length > 0) {
+      log.error(`❌ VERIFICATION FAILED: ${deletedFwRules.length} firewall rule(s) were DELETED during test: ${deletedFwRules.join(', ')}`);
+      verificationPassed = false;
+    }
+
+    if (leftoverFwRules.length === 0 && deletedFwRules.length === 0) {
+      log.info('✅ Firewall rules: Before and after match (no changes)');
+    }
+
+    // Check for NEW leftover NAT rules
+    const leftoverNatRules = [...natAfter].filter(id => !natBefore.has(id));
+    if (leftoverNatRules.length > 0) {
+      log.error(`❌ VERIFICATION FAILED: ${leftoverNatRules.length} NEW leftover NAT rule(s) not cleaned up: ${leftoverNatRules.join(', ')}`);
+      verificationPassed = false;
+    }
+
+    // Check for DELETED NAT rules
+    const deletedNatRules = [...natBefore].filter(id => !natAfter.has(id));
+    if (deletedNatRules.length > 0) {
+      log.error(`❌ VERIFICATION FAILED: ${deletedNatRules.length} NAT rule(s) were DELETED during test: ${deletedNatRules.join(', ')}`);
+      verificationPassed = false;
+    }
+
+    if (leftoverNatRules.length === 0 && deletedNatRules.length === 0) {
+      log.info('✅ NAT rules: Before and after match (no changes)');
+    }
+
+    // Fail the test if verification failed
+    if (!verificationPassed) {
+      log.error('❌ NETWORK ISOLATION VIOLATED: Test modified existing system rules!');
+    }
+    log.info('Verification complete, disconnecting client');
+  } catch (e) {
+    log.error(`Verification failed with error: ${e.message}`);
+  }
+
+  try {
+    if (client) {
+      log.info('Calling client.disconnect()');
+      client.disconnect();
+      log.info('client.disconnect() returned');
+    }
+  } catch (e) {
+    log.warn(`Error during disconnect: ${e.message}`);
+  }
   log.separator('Networking Suite — Teardown complete');
 });
 
@@ -208,15 +312,13 @@ describe('UC-NET-002 — Update an Existing Firewall Rule', () => {
 
   test('update_firewall_rule changes action from ALLOW to DROP', async () => {
     log.separator(UC + ': update_firewall_rule');
+    // FIX #1 & #3: Fail hard if rule ID wasn't captured — don't use fallback
     if (!created.firewallRuleId) {
-      log.warn('No created ruleId — fetching first user-defined rule');
-      const rules = toArray(await client.call('list_firewall_rules', {
-        edgeGatewayId: resolvedEdgeGatewayId,
-      }));
-      // Only use user-defined rules (not default/system rules) — default rules are read-only
-      const userRule = rules.find(r => !r._isDefault && (get(r, 'id') || get(r, 'ruleId')));
-      expect(userRule).toBeTruthy();
-      created.firewallRuleId = get(userRule, 'id') || get(userRule, 'ruleId');
+      const errorMsg = 'Failed to capture firewall rule ID from UC-NET-001. Cannot proceed with update test. ' +
+                       'Check if rule creation returned an ID or if polling found the newly created rule.';
+      log.error(`❌ ${errorMsg}`);
+      expect(created.firewallRuleId).toBeTruthy();
+      return; // Skip remaining tests in this suite
     }
 
     const result = await client.call('update_firewall_rule', {
@@ -312,13 +414,17 @@ describe('UC-NET-004 — Create a DNAT Rule', () => {
       await new Promise(r => setTimeout(r, 2000));
       const rules = toArray(await client.call('list_nat_rules', { edgeGatewayId: resolvedEdgeGatewayId }));
       const found = rules.find(r => r.name === natRuleName || r.displayName === natRuleName);
-      if (found) ruleId = get(found, 'id') || get(found, 'natRuleId') || get(found, 'ruleId');
-      else if (rules.length > 0) {
-        // Fallback: use the last rule added (likely ours)
-        const last = rules[rules.length - 1];
-        ruleId = get(last, 'id') || get(last, 'natRuleId') || get(last, 'ruleId');
+      if (found) {
+        ruleId = get(found, 'id') || get(found, 'natRuleId') || get(found, 'ruleId');
+        log.debug(`NAT rule list lookup: found by name, ruleId=${ruleId}`);
+      } else {
+        // FIX #2 & #3: Don't use last-rule fallback — it could delete an existing system rule!
+        const errorMsg = `Failed to find NAT rule "${natRuleName}" by name after creation. ` +
+                        `Cannot identify which rule was created. Refusing to use fallback logic to avoid deleting existing rules.`;
+        log.error(`❌ ${errorMsg}`);
+        expect(found).toBeTruthy(); // Fail the test
+        return;
       }
-      log.debug(`NAT rule list lookup: found ruleId=${ruleId}`);
     }
     created.natRuleId = ruleId;
     log.result(UC, 'create_nat_rule DNAT', !!result, `natRuleId=${ruleId}`);

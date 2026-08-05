@@ -11,6 +11,8 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
+import * as yaml from 'js-yaml';
+
 import { ZettagridClient } from '../client/zettagrid-client.js';
 import { McpToolResponse, VdcResourceSummary } from '../types.js';
 
@@ -306,6 +308,7 @@ export class ZettagridMcpServer {
                 type: 'string',
                 description: 'Virtual machine ID'
               },
+              forceCustomization: { type: 'boolean', description: 'Re-run guest OS customization on power-on even though the VM was already deployed. Guest properties must normally be set BEFORE first power-on — a PUT to guestCustomizationSection while the VM is already powered on does not by itself re-trigger customization. If guest properties were changed after power-on, power the VM off first, then power on with forceCustomization:true to apply them.' },
               waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
               timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: {
@@ -411,7 +414,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_firewall_rule',
-          description: 'Create an NSX-T firewall rule on an edge gateway. Required fields: edgeGatewayId, name, policy ("allow" or "drop" — NOT "action"). For port-based matching pass portProfiles (array of URNs) — NOT portProfileIds. Typical DNAT companion: direction=IN, policy=allow, portProfiles=[external-port-profile-URN]. Use list_application_port_profiles to find URNs.',
+          description: 'Create an NSX-T firewall rule on an edge gateway. Required fields: edgeGatewayId, name, policy ("allow" or "drop"). **SIMPLIFIED**: Pass destinationPortRange (e.g. "1022" or "8080-8090") and the tool auto-creates the application port profile if needed — no manual profile creation. Auto-created profiles default to TCP; pass protocol: "udp" explicitly for UDP services (e.g. DNS, syslog). ICMP has no port number, so bare destinationPortRange/portProfiles port numbers cannot auto-create an ICMP profile — pre-create one with create_application_port_profile (protocol ICMPv4/ICMPv6) or find an existing one via list_application_port_profiles, then pass its name/URN via portProfiles. Alternatively, pass portProfiles with URNs or profile names for manual control. For DNAT rules, use sourceIp (source public IP) and destinationFirewallGroups (destination gateway group). Example: sourceIp=119.235.223.219, destinationFirewallGroups=[gateway-group-URN], destinationPortRange=1022, policy=allow automatically creates CUSTOM-TCP-1022 and allows traffic from your public IP to that port.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -464,11 +467,11 @@ export class ZettagridMcpServer {
               portProfiles: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Application port profile URNs to match — use THIS (NOT portProfileIds). E.g. ["urn:vcloud:applicationPortProfile:xxx"]. Omit to match any port.'
+                description: 'Application port profile URNs or names to match. Can pass URNs (e.g. "urn:vcloud:applicationPortProfile:xxx") or profile names (e.g. "SSH", "HTTP", "CUSTOM-SSH-1022", "1022"). Omit to match any port. Tool auto-creates profiles from port numbers if not found (e.g., passing ["1022"] auto-creates CUSTOM-TCP-1022).'
               },
               portProfileId: {
                 type: 'string',
-                description: 'Single application port profile URN (alternative to portProfiles array for a single profile)'
+                description: 'Single application port profile URN or name (alternative to portProfiles array for a single profile). Supports both URNs and names for auto-lookup/creation.'
               },
               sourceFirewallGroups: {
                 type: 'array',
@@ -479,6 +482,10 @@ export class ZettagridMcpServer {
                 type: 'array',
                 items: { type: 'string' },
                 description: 'Destination firewall group URNs (IP sets, security groups). Omit for Any.'
+              },
+              vdcId: {
+                type: 'string',
+                description: 'VDC ID to scope an auto-created port profile to (from destinationPortRange/portProfiles bare port numbers). Only needed if the org has more than one VDC — the tool refuses to guess which one and will error asking for this if omitted and ambiguous. Get it from list_vdcs.'
               },
               zoneId: {
                 type: 'string',
@@ -585,7 +592,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_nat_rule',
-          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP. For DNAT: set firewallMatch to MATCH_EXTERNAL_ADDRESS (recommended — matches traffic on the external/public port before NAT; the default MATCH_INTERNAL_ADDRESS matches after NAT and typically mismatches firewall rules keyed on the external port). The applicationPortProfileId defines the internal destination protocol/port; dnatExternalPort overrides the incoming external port.',
+          description: 'Create a DNAT or SNAT rule on an edge gateway. DNAT maps a public IP:port to a private IP:port (port forwarding). SNAT maps a source subnet to an outbound IP. **SIMPLIFIED**: Pass just internalPort (e.g. "22" for SSH) and the tool auto-creates the application port profile if needed. Or pass applicationPortProfileName to use an existing profile by name. Auto-created profiles default to TCP; pass protocol: "udp" explicitly for UDP services (e.g. DNS, syslog). ICMP has no port number, so internalPort auto-create rejects it — find an existing ICMPv4/ICMPv6 profile via list_application_port_profiles and pass its URN via applicationPortProfileId instead. For DNAT: set firewallMatch to MATCH_EXTERNAL_ADDRESS (recommended — matches traffic on the external/public port before NAT; the default MATCH_INTERNAL_ADDRESS matches after NAT and typically mismatches firewall rules keyed on the external port). The applicationPortProfile now auto-creates and manages protocol definitions — no manual profile creation required.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -595,12 +602,14 @@ export class ZettagridMcpServer {
               externalAddresses: { type: 'string', description: 'Public/external IP address (e.g. 203.0.113.1)' },
               internalAddresses: { type: 'string', description: 'Private/internal IP address or subnet (e.g. 192.168.1.10)' },
               externalPort: { type: 'string', description: 'External port number or range (e.g. "80" or "8080-8090"), omit for any' },
-              internalPort: { type: 'string', description: 'Internal port number (e.g. "80"), omit to match external' },
+              internalPort: { type: 'string', description: 'Internal destination port number (e.g. "22" for SSH). When specified, auto-creates CUSTOM-{PROTOCOL}-{port} application port profile if it doesn\'t exist — no manual profile creation needed. For SSH use port "22", for HTTP use "80", for HTTPS use "443".' },
+              protocol: { type: 'string', enum: ['tcp', 'udp'], description: 'Protocol for the internalPort auto-created/matched profile (default: tcp). Use "udp" for UDP services. Ignored once applicationPortProfileId/Name is given directly. ICMP is not supported here (no port number) — use applicationPortProfileId with an existing ICMP profile instead.' },
               description: { type: 'string', description: 'Optional description' },
               enabled: { type: 'boolean', description: 'Enable rule immediately (default true)' },
-              applicationPortProfileId: { type: 'string', description: 'Application port profile URN for protocol matching (optional)' },
-              applicationPortProfileName: { type: 'string', description: 'Display name for the port profile (optional)' },
+              applicationPortProfileId: { type: 'string', description: 'Application port profile URN (optional — use internalPort instead for auto-creation)' },
+              applicationPortProfileName: { type: 'string', description: 'Application port profile name to lookup and use (e.g. "SSH", "HTTP", "CUSTOM-SSH-1022"). Tool looks up the profile by name.' },
               firewallMatch: { type: 'string', enum: ['MATCH_INTERNAL_ADDRESS', 'MATCH_EXTERNAL_ADDRESS', 'BYPASS'], description: 'Firewall match mode (default: MATCH_INTERNAL_ADDRESS)' },
+              vdcId: { type: 'string', description: 'VDC ID to scope an auto-created port profile to (from internalPort). Only needed if the org has more than one VDC — the tool refuses to guess which one and will error asking for this if omitted and ambiguous. Get it from list_vdcs.' },
               zoneId: { type: 'string', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
             required: ['edgeGatewayId', 'name', 'type', 'externalAddresses', 'internalAddresses']
@@ -860,7 +869,8 @@ export class ZettagridMcpServer {
             type: 'object',
             properties: {
               vappId: { type: 'string', description: 'vApp ID' },
-              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself' },
+              forceCustomization: { type: 'boolean', description: 'Re-run guest OS customization on power-on even though the VM was already deployed. Guest properties must normally be set BEFORE first power-on — a PUT to guestCustomizationSection while the VM is already powered on does not by itself re-trigger customization. If guest properties were changed after power-on, power off first, then power on with forceCustomization:true to apply them. vCD only supports this attribute at the VM level (not the vApp level), so when true this powers each VM in the vApp on individually and returns data.vmTasks (an array of per-VM results) instead of a single taskId — waitForTask does not apply in this mode, poll each vmTasks[].taskId yourself via get_task.' },
+              waitForTask: { type: 'boolean', description: 'Wait for the task to complete before returning, instead of returning a bare taskId to poll yourself. Not applicable when forceCustomization:true — see forceCustomization.' },
               timeoutMs: { type: 'number', description: 'Max time to wait in ms when waitForTask is true (default 120000, max 300000)' },
               zoneId: { type: 'string', description: 'Zone ID (optional)', enum: ['sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'] }
             },
@@ -883,7 +893,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_vapp',
-          description: 'Deploy a new vApp from a catalog template. IMPORTANT: All VM configuration (name, network, OVF properties) must go inside instantiationParams.vmConfigs — top-level vmConfigs/ovfProperties are silently ignored. CPU/memory/disk are NOT applied during instantiation (vCD limitation) — use update_vm_cpu/update_vm_memory/update_vm_disk afterward (sequentially, waiting for each task). Typical workflow: create_vapp → get_task until success → update_vm_disk → get_task → update_vm_memory → get_task → power_on_vapp. Network auto-discovery: if vmConfigs omit networkConnections and only one routed network exists it is used automatically (POOL mode); if multiple networks exist returns CLARIFICATION_REQUIRED — call list_org_networks first.',
+          description: 'Deploy a new vApp from a catalog template. IMPORTANT: All VM configuration (name, network, OVF properties) must go inside instantiationParams.vmConfigs — top-level vmConfigs/ovfProperties are silently ignored. CPU/memory/disk are NOT applied during instantiation (vCD limitation) — use update_vm_cpu/update_vm_memory/update_vm_disk afterward (sequentially, waiting for each task). Typical workflow: create_vapp → get_task until success → update_vm_disk → get_task → update_vm_memory → get_task → power_on_vapp. Network auto-discovery: if vmConfigs omit networkConnections and the VDC has exactly one network of any kind (routed or isolated) it is used automatically (POOL mode); if more than one exists (of any kind — isolated networks are valid options too, not just routed) returns CLARIFICATION_REQUIRED listing all of them with a networkType field — call list_org_networks first if you want to see them without triggering the check.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -924,6 +934,7 @@ export class ZettagridMcpServer {
                         diskSizeMB: { type: 'number', description: 'Boot disk size in MB. NOT applied by this call; recorded only. You must call update_vm_disk yourself after creation to actually set it.' },
                         storageProfileHref: { type: 'string', description: 'Storage policy href' },
                         storageProfileName: { type: 'string', description: 'Storage policy name' },
+                        userDataYaml: { type: 'string', description: 'Cloud-init YAML configuration (cloud-init templates only). Pass unencoded YAML starting with "#cloud-config". The MCP server validates it, base64-encodes it, and injects it as the "user-data" OVF property. Cloud-init will decode and apply it at boot. NOTE: a top-level "network:" key is NOT applied from user-data by cloud-init\'s OVF datasource (this is a cloud-init/vCD limitation, not a bug) — the server automatically detects and re-routes it to a separate "network-config" OVF property instead, which is where this datasource actually reads network config from.' },
                         networkConnections: {
                           type: 'array',
                           description: 'VM NIC connections to org VDC networks',
@@ -942,7 +953,7 @@ export class ZettagridMcpServer {
                         },
                         ovfProperties: {
                           type: 'array',
-                          description: 'OVF ProductSection properties for cloud-init (Ubuntu). Keys: hostname, instance-id (required), password, public-keys, user-data (base64), seedfrom',
+                          description: 'OVF ProductSection properties for cloud-init (Ubuntu). RECOMMENDED: use "userDataYaml" field (at vmConfigs level, not here) to pass unencoded cloud-init YAML — server validates and base64-encodes it. MANUAL APPROACH (if not using userDataYaml): set "public-keys" to raw SSH key (e.g., "ssh-ed25519 AAAAC3..."), and "user-data" to base64-encoded YAML. Keys: hostname, instance-id, password, public-keys (raw SSH key), user-data (base64-encoded YAML), seedfrom',
                           items: {
                             type: 'object',
                             properties: {
@@ -954,7 +965,7 @@ export class ZettagridMcpServer {
                         },
                         guestCustomization: {
                           type: 'object',
-                          description: 'Guest OS customization (Windows VMs / VCD guest tools)',
+                          description: 'Guest OS customization (Windows VMs / VCD guest tools). Most Windows templates already ship with correct defaults — omit this entirely unless you need to override them. If you do set adminPasswordEnabled:true, it must be paired with either adminPasswordAuto:true or an explicit adminPassword — otherwise vCD silently forces it back to false and no password gets configured. Applied and verified before this call returns, so it is always safe to power on immediately after — but if you change guest properties on a VM that is ALREADY powered on, that alone will not re-apply them; power off first, then power on with forceCustomization:true.',
                           properties: {
                             enabled: { type: 'boolean' },
                             computerName: { type: 'string' },
@@ -1095,7 +1106,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'add_vm_to_vapp',
-          description: 'Add a VM from a catalog template into an existing vApp. The vApp must already exist (use create_vapp or list_vapps to find it). Network ipMode defaults to POOL when pool IPs are available; if pool is exhausted and vdcId is provided, clarification is requested. Compute overrides (CPU, memory, disk) are not applied during instantiation — use update_vm_cpu / update_vm_memory / update_vm_disk on the new VM afterward.',
+          description: 'Add a VM from a catalog template into an existing vApp. The vApp must already exist (use create_vapp or list_vapps to find it). If networkConnections is omitted: with exactly one network already configured on the vApp, it is used automatically; with more than one, CLARIFICATION_REQUIRED is returned listing the vApp\'s existing networks — specify networkConnections to pick one (only networks the vApp already has can be used; this tool cannot bridge in a new one). Network ipMode defaults to POOL when pool IPs are available; if pool is exhausted and vdcId is provided, clarification is requested. Compute overrides (CPU, memory, disk) are not applied during instantiation — use update_vm_cpu / update_vm_memory / update_vm_disk on the new VM afterward.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -1192,7 +1203,7 @@ export class ZettagridMcpServer {
         },
         {
           name: 'create_application_port_profile',
-          description: 'Create a custom application port profile (tenant-scoped). NOTE: the response data is empty — the URN is NOT returned. After creation call list_application_port_profiles(filter: TENANT) to retrieve the new profile\'s URN. Use list_application_port_profiles first to avoid creating duplicates.',
+          description: 'Create a custom application port profile (tenant-scoped). Returns the created profile including its URN. Use list_application_port_profiles first to avoid creating duplicates.',
           inputSchema: {
             type: 'object',
             properties: {
@@ -1230,6 +1241,14 @@ export class ZettagridMcpServer {
             },
             required: ['profileId']
           }
+        },
+        {
+          name: 'get_server_version',
+          description: 'Get the MCP server version and build information',
+          inputSchema: {
+            type: 'object',
+            properties: {}
+          }
         }
       ]
     }));
@@ -1264,7 +1283,50 @@ export class ZettagridMcpServer {
           return val as number;
         };
 
+        // Validation helpers for ambiguous requests
+        const validateNatRuleRequest = () => {
+          const type = args?.type as string;
+          const hasAppPort = args?.applicationPortProfileId || args?.applicationPortProfileName;
+
+          if (type === 'DNAT' && !hasAppPort && !args?.externalPort) {
+            throw new McpError(
+              ErrorCode.InvalidParams,
+              'DNAT rule requires either: (1) applicationPortProfileId/Name (RECOMMENDED - defines external port + protocol), or (2) explicit externalPort. ' +
+              'Example: For SSH on port 1022, create a CUSTOM-SSH-1022 application port profile first with create_application_port_profile, then reference it via applicationPortProfileId. ' +
+              'This ensures firewall rules can properly match the port definition.'
+            );
+          }
+        };
+
         switch (name) {
+          case 'get_server_version': {
+            // Get version from package.json and git commit hash
+            let version = '1.3.0'; // fallback
+            let buildNumber = 'unknown';
+
+            try {
+              const { execSync } = await import('child_process');
+              buildNumber = execSync('git rev-parse --short HEAD 2>/dev/null || echo "unknown"').toString().trim();
+            } catch {
+              // Git not available or not in git repo
+            }
+
+            result = {
+              success: true,
+              data: {
+                name: '@zettagrid/vmware-mcp',
+                version,
+                buildNumber,
+                buildDate: new Date().toISOString(),
+                nodeVersion: process.version,
+                platform: process.platform,
+                arch: process.arch
+              }
+            };
+            responseText = JSON.stringify(result.data, null, 2);
+            break;
+          }
+
           case 'test_zone':
             result = await this.client.testZone(req('zoneId'));
             break;
@@ -1308,7 +1370,7 @@ export class ZettagridMcpServer {
             break;
 
           case 'power_on_vm':
-            result = await this.client.powerOnVM(req('vmId'), args?.zoneId as string | undefined);
+            result = await this.client.powerOnVM(req('vmId'), args?.zoneId as string | undefined, args?.forceCustomization as boolean | undefined);
             break;
 
           case 'power_off_vm':
@@ -1346,6 +1408,10 @@ export class ZettagridMcpServer {
               portProfileId: args?.portProfileId as string | undefined,
               sourceFirewallGroups: args?.sourceFirewallGroups as string[] | undefined,
               destinationFirewallGroups: args?.destinationFirewallGroups as string[] | undefined,
+              // Governs the protocol of any port profile auto-created from a bare port
+              // number/range (portProfiles entry or destinationPortRange) — default 'tcp'.
+              protocol: args?.protocol as string | undefined,
+              vdcId: args?.vdcId as string | undefined,
               protocols: {
                 tcp: args?.protocol === 'tcp' || args?.protocol === 'any',
                 udp: args?.protocol === 'udp' || args?.protocol === 'any',
@@ -1411,6 +1477,7 @@ export class ZettagridMcpServer {
             break;
 
           case 'create_nat_rule':
+            validateNatRuleRequest();
             result = await this.client.createNatRule(
               req('edgeGatewayId'),
               {
@@ -1420,11 +1487,13 @@ export class ZettagridMcpServer {
                 internalAddresses: req('internalAddresses'),
                 ...(args?.externalPort !== undefined && { externalPort: args.externalPort as string }),
                 ...(args?.internalPort !== undefined && { internalPort: args.internalPort as string }),
+                ...(args?.protocol !== undefined && { protocol: args.protocol as string }),
                 ...(args?.description !== undefined && { description: args.description as string }),
                 ...(args?.enabled !== undefined && { enabled: args.enabled as boolean }),
                 ...(args?.applicationPortProfileId !== undefined && { applicationPortProfileId: args.applicationPortProfileId as string }),
                 ...(args?.applicationPortProfileName !== undefined && { applicationPortProfileName: args.applicationPortProfileName as string }),
                 ...(args?.firewallMatch !== undefined && { firewallMatch: args.firewallMatch as string }),
+                ...(args?.vdcId !== undefined && { vdcId: args.vdcId as string }),
               },
               args?.zoneId as string | undefined
             );
@@ -1547,7 +1616,7 @@ export class ZettagridMcpServer {
             break;
 
           case 'power_on_vapp':
-            result = await this.client.powerOnVApp(req('vappId'), args?.zoneId as string | undefined);
+            result = await this.client.powerOnVApp(req('vappId'), args?.zoneId as string | undefined, args?.forceCustomization as boolean | undefined);
             break;
 
           case 'power_off_vapp':
@@ -1566,9 +1635,59 @@ export class ZettagridMcpServer {
             if (args?.networkConnections !== undefined) {
               configErrors.push('"networkConnections" was passed at the top level — it must be inside instantiationParams.vmConfigs[].networkConnections');
             }
+
+            // Handle user-data YAML encoding: users send unencoded YAML, server validates and base64-encodes
             const vmCfgs = (args?.instantiationParams as any)?.vmConfigs;
             if (Array.isArray(vmCfgs)) {
               vmCfgs.forEach((cfg: any, i: number) => {
+                // Process userDataYaml if provided (unencoded, user-friendly)
+                const userDataYaml = cfg?.userDataYaml;
+                if (userDataYaml && typeof userDataYaml === 'string') {
+                  // Validate YAML by checking if it starts with #cloud-config
+                  if (!userDataYaml.trim().startsWith('#cloud-config')) {
+                    configErrors.push(`instantiationParams.vmConfigs[${i}].userDataYaml: must start with "#cloud-config"`);
+                  } else {
+                    let effectiveUserData = userDataYaml;
+
+                    // A top-level `network:` key here would be silently ignored by cloud-init —
+                    // its OVF datasource reads network config exclusively from a separate
+                    // "network-config" property, never from user-data (confirmed against
+                    // cloud-init's DataSourceOVF source; see bug_cloudinit_network_config_property
+                    // memory). Extract it and route it to network-config ourselves instead of
+                    // letting a user's networking silently do nothing.
+                    try {
+                      const parsed = yaml.load(userDataYaml) as Record<string, any> | undefined;
+                      if (parsed && typeof parsed === 'object' && parsed.network) {
+                        const networkConfigYaml = yaml.dump({ network: parsed.network });
+                        cfg.ovfProperties = cfg.ovfProperties ?? [];
+                        cfg.ovfProperties = (cfg.ovfProperties as any[]).filter((p: any) => p.key !== 'network-config');
+                        cfg.ovfProperties.push({ key: 'network-config', value: Buffer.from(networkConfigYaml).toString('base64') });
+
+                        // Strip network: from what's left of user-data — it would just be dead,
+                        // confusing weight there now that it's been moved.
+                        const { network: _network, ...remaining } = parsed;
+                        effectiveUserData = Object.keys(remaining).length > 0
+                          ? `#cloud-config\n${yaml.dump(remaining)}`
+                          : '#cloud-config\n{}';
+                      }
+                    } catch {
+                      // If parsing fails, fall through and encode userDataYaml verbatim as
+                      // before — cloud-init will surface its own error for genuinely malformed
+                      // YAML; this extraction is a best-effort addition, not a new validation gate.
+                    }
+
+                    // Base64-encode and add to ovfProperties
+                    const encoded = Buffer.from(effectiveUserData).toString('base64');
+                    cfg.ovfProperties = cfg.ovfProperties ?? [];
+                    // Remove any existing user-data property
+                    cfg.ovfProperties = (cfg.ovfProperties as any[]).filter((p: any) => p.key !== 'user-data');
+                    // Add base64-encoded user-data
+                    cfg.ovfProperties.push({ key: 'user-data', value: encoded });
+                    // Remove userDataYaml from config (it's been processed)
+                    delete cfg.userDataYaml;
+                  }
+                }
+
                 if (cfg?.name !== undefined && cfg?.vmName === undefined) {
                   configErrors.push(`instantiationParams.vmConfigs[${i}]: use "vmName" not "name" to set the VM display name`);
                 }
@@ -1580,6 +1699,31 @@ export class ZettagridMcpServer {
                 }
                 if (cfg?.memory !== undefined && cfg?.memoryMB === undefined) {
                   configErrors.push(`instantiationParams.vmConfigs[${i}]: use "memoryMB" not "memory"`);
+                }
+                // Validate authentication: require at least password or SSH key
+                const ovfProps = cfg?.ovfProperties as any[] | undefined;
+                const hasPassword = ovfProps?.some(p => p.key === 'password' && p.value);
+                const hasPublicKeys = ovfProps?.some(p => p.key === 'public-keys' && p.value);
+                const hasGuestAuthAdmin = cfg?.guestCustomization?.adminPassword;
+
+                // Check for common SSH key mistakes
+                const hasPublicKeysUnderscore = ovfProps?.some(p => p.key === 'public_keys' && p.value);
+                const hasUserData = ovfProps?.some(p => p.key === 'user-data' && p.value);
+
+                if (hasPublicKeysUnderscore) {
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: OVF property key should be "public-keys" (hyphen), not "public_keys" (underscore)`);
+                }
+
+                if (hasUserData) {
+                  const userDataProp = ovfProps?.find(p => p.key === 'user-data');
+                  // Check if user-data looks like unencoded YAML (starts with #cloud-config)
+                  if (userDataProp?.value && typeof userDataProp.value === 'string' && userDataProp.value.startsWith('#')) {
+                    configErrors.push(`instantiationParams.vmConfigs[${i}]: OVF property "user-data" (in ovfProperties array) must be BASE64-encoded. Instead, use the "userDataYaml" field at vmConfigs level — the server will validate and encode it for you.`);
+                  }
+                }
+
+                if (!hasPassword && !hasPublicKeys && !hasGuestAuthAdmin) {
+                  configErrors.push(`instantiationParams.vmConfigs[${i}]: must provide at least one authentication method: (1) OVF property "public-keys" (raw SSH public key string) for cloud-init Linux VMs, (2) OVF property "password" for cloud-init VMs, or (3) guestCustomization.adminPassword for Windows VMs`);
                 }
               });
             }

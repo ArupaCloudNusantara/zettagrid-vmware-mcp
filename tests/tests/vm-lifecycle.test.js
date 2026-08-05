@@ -13,7 +13,7 @@ const cfg       = require('../config');
 const { makeLogger } = require('../logger');
 const { waitForTask, waitForVmPower, toArray, get, sleep } = require('../helpers');
 
-const log = makeLogger('vm-lifecycle');
+const log = makeLogger('vm-lifecycle.test');
 let client;
 
 beforeAll(async () => {
@@ -23,7 +23,16 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  if (client) client.disconnect();
+  log.info('Starting VM Lifecycle Suite teardown...');
+  try {
+    if (client) {
+      log.info('Disconnecting client');
+      client.disconnect();
+      log.info('Client disconnected');
+    }
+  } catch (e) {
+    log.warn(`Error during disconnect: ${e.message}`);
+  }
   log.separator('VM Lifecycle Suite — Teardown complete');
 });
 
