@@ -1433,9 +1433,19 @@ export class ZettagridClient {
       .filter(a => a.innerNetwork !== a.containerNetwork && a.innerNetwork.toLowerCase() !== 'none');
   }
 
-  /** Generate netplan v2 configuration YAML for cloud-init to apply during boot.
-   *  Used for Ubuntu 24.04+ VMs with MANUAL IP mode instead of relying on vCD guest customization. */
-  private generateNetplanUserData(
+  /**
+   * Generates netplan v2 YAML for injection as the OVF "network-config" property — NOT
+   * "user-data". Confirmed via cloud-init's DataSourceOVF source: network config for this
+   * datasource is read exclusively from a dedicated "network-config" OVF property
+   * (base64-encoded YAML, top-level `network:` key), never from user-data's cloud-config.
+   * Per cloud-init's own docs: "user-data cannot change an instance's network configuration."
+   * A `network:` key embedded in user-data is silently ignored — confirmed live via
+   * `cloud-init analyze show`, which showed no network-related module ever running; network
+   * setup happens during datasource activation, before user-data's cloud-config modules run
+   * at all, and falls back to cloud-init's own MAC-matched DHCP config when the datasource
+   * has no network-config to offer.
+   */
+  private generateNetplanConfig(
     nicIndex: number,
     ipAddress: string,
     gateway: string | undefined,
@@ -1459,12 +1469,20 @@ export class ZettagridClient {
       }
     }
 
-    const ethName = `eth${nicIndex}`;
-    const netplanYaml = `#cloud-config
-network:
+    // Match by name pattern instead of a hardcoded "ethN" — Ubuntu cloud images typically use
+    // systemd's predictable network interface naming (ens*/enp*/eno*), not legacy "ethN", so a
+    // fixed name here would silently target a device that doesn't exist and never actually
+    // apply. "e*" covers eth/ens/enp/eno — effectively every real-world Linux NIC name — without
+    // needing to know the exact predictable name in advance (unknowable before the VM exists).
+    const ifaceId = `id${nicIndex}`;
+    // No "#cloud-config" header here — unlike user-data, the network-config property is parsed
+    // as plain YAML with a top-level "network:" key, not a cloud-config document.
+    const netplanYaml = `network:
   version: 2
   ethernets:
-    ${ethName}:
+    ${ifaceId}:
+      match:
+        name: "e*"
       dhcp4: false
       dhcp6: false
       addresses:
@@ -1473,7 +1491,6 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       nameservers:
         addresses: [8.8.8.8, 8.8.4.4]`;
 
-    // Encode as cloud-config for cloud-init
     return netplanYaml;
   }
 
@@ -2125,8 +2142,14 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             ovfPropKeys.includes('instance-id') ||
             ovfPropKeys.includes('public-keys') ||
             ovfPropKeys.includes('user-data');
-          if (isCloudInitTemplate && renamedCfg.networkConnections?.length) {
-            const manualNic = renamedCfg.networkConnections.find(nc => nc.ipMode === 'MANUAL' && nc.ipAddress);
+          if (isCloudInitTemplate && cfg.networkConnections?.length) {
+            // Look up the network by its ORIGINAL (real org) name from `cfg`, not `renamedCfg` —
+            // renamedCfg's NIC may have been rewritten to the template's internal placeholder
+            // network name (e.g. "VM Network") for vApp NetworkConfig matching purposes.
+            // fetchVdcNetworkOptions only knows real org network names, so looking it up under
+            // the renamed value always misses, silently skipping user-data injection entirely.
+            const manualNicIndex = cfg.networkConnections.findIndex(nc => nc.ipMode === 'MANUAL' && nc.ipAddress);
+            const manualNic = manualNicIndex >= 0 ? cfg.networkConnections[manualNicIndex] : undefined;
             if (manualNic && manualNic.ipAddress) {
               try {
                 // Fetch network details to get gateway and subnet for netplan
@@ -2134,19 +2157,22 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
                 const matchedNet = nets.find(n => n.name === manualNic.networkName);
                 if (matchedNet) {
                   const netDetail = await this.fetchNetworkDetailedConfig(matchedNet.href, vdcId, manualNic.networkName, zoneId);
-                  const nicIndex = renamedCfg.networkConnections.indexOf(manualNic);
-                  const userDataYaml = this.generateNetplanUserData(nicIndex, manualNic.ipAddress, netDetail?.gateway, netDetail?.subnetMask);
-                  // Inject user-data as an OVF property (cloud-init will pick it up)
-                  const hasUserData = renamedCfg.ovfProperties?.some(p => p.key === 'user-data');
-                  if (!hasUserData) {
+                  const nicIndex = manualNicIndex;
+                  const netplanYaml = this.generateNetplanConfig(nicIndex, manualNic.ipAddress, netDetail?.gateway, netDetail?.subnetMask);
+                  // Inject as the "network-config" OVF property — NOT "user-data". Cloud-init's
+                  // DataSourceOVF reads network config exclusively from this dedicated property
+                  // (base64-encoded YAML, top-level "network:" key); a `network:` key inside
+                  // user-data is never consulted. See generateNetplanConfig's comment.
+                  const hasNetworkConfig = renamedCfg.ovfProperties?.some(p => p.key === 'network-config');
+                  if (!hasNetworkConfig) {
                     renamedCfg = {
                       ...renamedCfg,
-                      ovfProperties: [...(renamedCfg.ovfProperties ?? []), { key: 'user-data', value: userDataYaml }]
+                      ovfProperties: [...(renamedCfg.ovfProperties ?? []), { key: 'network-config', value: Buffer.from(netplanYaml).toString('base64') }]
                     };
                   }
                 }
               } catch (e) {
-                // If fetching network details fails, proceed without user-data
+                // If fetching network details fails, proceed without network-config
                 // (cloud-init will fall back to DHCP or other defaults)
               }
             }
@@ -2437,13 +2463,14 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             if (matchedNet) {
               const netDetail = await this.fetchNetworkDetailedConfig(matchedNet.href, vdcId, manualNic.networkName, zoneId);
               const nicIndex = configForXml.networkConnections.indexOf(manualNic);
-              const userDataYaml = this.generateNetplanUserData(nicIndex, manualNic.ipAddress, netDetail?.gateway, netDetail?.subnetMask);
-              // Inject user-data as an OVF property (cloud-init will pick it up)
-              const hasUserData = configForXml.ovfProperties?.some(p => p.key === 'user-data');
-              if (!hasUserData) {
+              const netplanYaml = this.generateNetplanConfig(nicIndex, manualNic.ipAddress, netDetail?.gateway, netDetail?.subnetMask);
+              // Inject as the "network-config" OVF property — see the identical fix/comment in
+              // createVApp's copy of this logic and generateNetplanConfig's doc comment.
+              const hasNetworkConfig = configForXml.ovfProperties?.some(p => p.key === 'network-config');
+              if (!hasNetworkConfig) {
                 configForXml = {
                   ...configForXml,
-                  ovfProperties: [...(configForXml.ovfProperties ?? []), { key: 'user-data', value: userDataYaml }]
+                  ovfProperties: [...(configForXml.ovfProperties ?? []), { key: 'network-config', value: Buffer.from(netplanYaml).toString('base64') }]
                 };
               }
             }
