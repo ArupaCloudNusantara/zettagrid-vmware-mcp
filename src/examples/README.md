@@ -7,12 +7,10 @@ This directory contains example scripts demonstrating various features of the Ze
 ### Core Functionality Tests
 - **`connectivity-test.ts`** - Test zone connectivity and basic authentication
 - **`complete-vm-test.ts`** - Full VM lifecycle test (create vApp, VM, power operations)
-- **`comprehensive-test.ts`** - Comprehensive API testing across multiple zones
 - **`live-test.ts`** - Live testing against real Zettagrid infrastructure
 - **`vm-power-test.ts`** - VM power management examples
 
 ### Network and Security
-- **`firewall-test.ts`** - Firewall rule creation and management
 - **`firewall-investigation.ts`** - Firewall configuration analysis
 - **`nsxt-firewall-investigation.ts`** - NSX-T specific firewall analysis
 
@@ -34,9 +32,6 @@ npx tsx src/examples/connectivity-test.ts
 
 # Run complete VM test
 npx tsx src/examples/complete-vm-test.ts
-
-# Run firewall tests
-npx tsx src/examples/firewall-test.ts
 ```
 
 ### Environment Setup
