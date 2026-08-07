@@ -28,7 +28,8 @@ import {
   VAppInstantiationParams,
   VAppVmConfig,
   VAppNetworkConnection,
-  VAppGuestCustomization
+  VAppGuestCustomization,
+  InjectedZoneCredentials
 } from '../types.js';
 import {
   parseVdcRecords,
@@ -118,8 +119,9 @@ export class ZettagridClient {
     return String(match.id);
   }
 
-  constructor() {
-    this.zoneManager = new ZoneManager();
+  /** @param injected Per-request credentials for HTTP multi-tenant mode; omitted for stdio/env mode. */
+  constructor(injected?: InjectedZoneCredentials) {
+    this.zoneManager = new ZoneManager(injected);
     this.tokenManager = new TokenManager();
     this.initializeZoneAuth();
   }

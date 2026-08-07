@@ -3,18 +3,56 @@
  * Handles API token authentication and session management for vCloud Director
  */
 
+import { createHash } from 'node:crypto';
 import { AuthToken, AuthSession, ZoneConfig } from '../types.js';
 
+// Module-level, not per-instance: ZettagridClient constructs a fresh TokenManager on every
+// HTTP request, which would otherwise defeat this cache entirely and re-run the OAuth
+// handshake on every single tool call. Sharing the store across instances is what makes the
+// cache actually cache anything once the server is multi-tenant.
+const sessionStore: Map<string, AuthSession> = new Map();
+const tokenCacheStore: Map<string, AuthToken> = new Map();
+
+// Sessions past their expiry aren't useful to keep — this is what bounds the otherwise
+// unbounded Map in a long-lived multi-tenant process.
+const EVICTION_SWEEP_INTERVAL_MS = 10 * 60 * 1000;
+const EVICTION_GRACE_MS = 60 * 60 * 1000;
+
+function evictExpiredSessions(): void {
+  const cutoff = Date.now() - EVICTION_GRACE_MS;
+  for (const [key, session] of sessionStore.entries()) {
+    if (session.token.expiresAt.getTime() < cutoff) {
+      sessionStore.delete(key);
+      tokenCacheStore.delete(key);
+    }
+  }
+}
+
+const evictionTimer = setInterval(evictExpiredSessions, EVICTION_SWEEP_INTERVAL_MS);
+evictionTimer.unref();
+
 export class TokenManager {
-  private sessions: Map<string, AuthSession> = new Map();
-  private tokenCache: Map<string, AuthToken> = new Map();
+  private sessions = sessionStore;
+  private tokenCache = tokenCacheStore;
+
+  /**
+   * Cache key derived from the actual credential, not just zone+org name. Two different
+   * callers presenting different API tokens for the same zone/org must never share a cached
+   * session — the old `${zone}-${org}` key would let whoever authenticated first silently
+   * hand their access token to everyone else hitting the same zone/org.
+   */
+  private sessionKey(zoneConfig: ZoneConfig): string {
+    return createHash('sha256')
+      .update(`${zoneConfig.apiToken}:${zoneConfig.organizationName}:${zoneConfig.name}`)
+      .digest('hex');
+  }
 
   /**
    * Authenticate with a zone and create a session
    */
   async authenticateZone(zoneConfig: ZoneConfig): Promise<AuthSession> {
-    const sessionKey = `${zoneConfig.name}-${zoneConfig.organizationName}`;
-    
+    const sessionKey = this.sessionKey(zoneConfig);
+
     // Check if we have a valid cached session
     const existingSession = this.sessions.get(sessionKey);
     if (existingSession && this.isTokenValid(existingSession.token)) {
@@ -101,7 +139,7 @@ export class TokenManager {
    * Get valid session for a zone
    */
   async getSession(zoneConfig: ZoneConfig): Promise<AuthSession> {
-    const sessionKey = `${zoneConfig.name}-${zoneConfig.organizationName}`;
+    const sessionKey = this.sessionKey(zoneConfig);
     const existingSession = this.sessions.get(sessionKey);
 
     if (existingSession && this.isTokenValid(existingSession.token)) {
@@ -184,7 +222,7 @@ export class TokenManager {
    * Invalidate session for a zone
    */
   async invalidateSession(zoneConfig: ZoneConfig): Promise<void> {
-    const sessionKey = `${zoneConfig.name}-${zoneConfig.organizationName}`;
+    const sessionKey = this.sessionKey(zoneConfig);
     const session = this.sessions.get(sessionKey);
     
     if (session) {
@@ -289,7 +327,7 @@ export class TokenManager {
    * Get token expiration time for a zone
    */
   getTokenExpiration(zoneConfig: ZoneConfig): Date | null {
-    const sessionKey = `${zoneConfig.name}-${zoneConfig.organizationName}`;
+    const sessionKey = this.sessionKey(zoneConfig);
     const session = this.sessions.get(sessionKey);
     
     return session ? session.token.expiresAt : null;
@@ -299,7 +337,7 @@ export class TokenManager {
    * Check if session exists for zone
    */
   hasSession(zoneConfig: ZoneConfig): boolean {
-    const sessionKey = `${zoneConfig.name}-${zoneConfig.organizationName}`;
+    const sessionKey = this.sessionKey(zoneConfig);
     const session = this.sessions.get(sessionKey);
     
     return session !== undefined && this.isTokenValid(session.token);

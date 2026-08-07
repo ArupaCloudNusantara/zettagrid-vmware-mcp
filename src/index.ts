@@ -10,6 +10,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ZettagridMcpServer } from './server/mcp-server.js';
+import { extractZoneCredentials } from './middleware/auth.js';
 import dotenv from 'dotenv';
 import express from 'express';
 
@@ -69,11 +70,19 @@ async function runHttp(): Promise<void> {
     });
   });
 
-  // Stateless: new Server + transport per request (matches MCP streamable HTTP pattern)
+  // Stateless: new Server + transport per request (matches MCP streamable HTTP pattern).
+  // Multi-tenant: each caller supplies their own VCD credentials via headers rather than
+  // the server holding one shared identity for everyone.
   app.post('/mcp', async (req, res) => {
+    const extraction = extractZoneCredentials(req.headers);
+    if ('error' in extraction) {
+      res.status(extraction.error.status).json({ error: extraction.error.message });
+      return;
+    }
+
     try {
       const server = createServer();
-      const zettagridServer = new ZettagridMcpServer(server);
+      const zettagridServer = new ZettagridMcpServer(server, extraction.credentials);
       await zettagridServer.initialize();
 
       const transport = new StreamableHTTPServerTransport({

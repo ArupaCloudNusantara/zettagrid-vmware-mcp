@@ -14,14 +14,17 @@ import {
 import * as yaml from 'js-yaml';
 
 import { ZettagridClient } from '../client/zettagrid-client.js';
-import { McpToolResponse, VdcResourceSummary } from '../types.js';
+import { McpToolResponse, VdcResourceSummary, InjectedZoneCredentials } from '../types.js';
 
 export class ZettagridMcpServer {
   private server: Server;
   private client?: ZettagridClient;
+  private injectedCredentials?: InjectedZoneCredentials;
 
-  constructor(server: Server) {
+  /** @param injected Per-request credentials for HTTP multi-tenant mode; omitted for stdio/env mode. */
+  constructor(server: Server, injected?: InjectedZoneCredentials) {
     this.server = server;
+    this.injectedCredentials = injected;
   }
 
   /**
@@ -56,7 +59,7 @@ export class ZettagridMcpServer {
   private async handleShowAllVdcResources(zoneId?: string): Promise<McpToolResponse<string>> {
     try {
       if (!this.client) {
-        this.client = new ZettagridClient();
+        this.client = new ZettagridClient(this.injectedCredentials);
       }
 
       // First get list of all VDCs
@@ -141,7 +144,7 @@ export class ZettagridMcpServer {
   async initialize(): Promise<void> {
     try {
       // Initialize the client here, after environment is loaded
-      this.client = new ZettagridClient();
+      this.client = new ZettagridClient(this.injectedCredentials);
     } catch (error) {
       console.error('Failed to initialize Zettagrid client:', error);
       throw error;

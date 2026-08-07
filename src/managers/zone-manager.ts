@@ -2,16 +2,33 @@
  * Zettagrid Zone Manager - Multi-zone configuration and management
  */
 
-import { ZoneConfig, ZettagridConfig, ZoneId } from '../types.js';
+import { ZoneConfig, ZettagridConfig, ZoneId, InjectedZoneCredentials } from '../types.js';
 
 export class ZoneManager {
   private config: ZettagridConfig;
   private zones: Map<string, ZoneConfig> = new Map();
 
-  constructor() {
+  /**
+   * @param injected When provided (HTTP multi-tenant mode), the zone pool is this single
+   * caller-supplied credential instead of the env-scanned pool. Absent (stdio mode), behavior
+   * is unchanged: scan ZETTAGRID_API_TOKEN_<ZONE> for every zone.
+   */
+  constructor(injected?: InjectedZoneCredentials) {
     try {
       this.config = this.loadConfiguration();
-      this.initializeZones();
+      if (injected) {
+        const zoneConfig = this.buildZoneConfig(
+          injected.zone,
+          injected.apiToken,
+          injected.organizationName,
+          injected.apiVersion
+        );
+        this.zones.set(injected.zone, zoneConfig);
+        this.config.zones[injected.zone] = zoneConfig;
+        this.config.defaultZone = injected.zone;
+      } else {
+        this.initializeZones();
+      }
     } catch (error) {
       console.error('Failed to initialize ZoneManager:', error);
       throw error;
@@ -62,12 +79,12 @@ export class ZoneManager {
   }
 
   /**
-   * Load configuration for a specific zone
+   * Load configuration for a specific zone from environment variables
    */
   private loadZoneConfig(zoneName: ZoneId): ZoneConfig | null {
     const tokenEnvVar = `ZETTAGRID_API_TOKEN_${zoneName.toUpperCase()}`;
     const apiToken = process.env[tokenEnvVar];
-    
+
     if (!apiToken) {
       console.warn(`Zone '${zoneName}' not configured: missing ${tokenEnvVar}`);
       return null;
@@ -79,6 +96,19 @@ export class ZoneManager {
       throw new Error('ZETTAGRID_ORGANIZATION environment variable is required');
     }
 
+    return this.buildZoneConfig(zoneName, apiToken, organizationName);
+  }
+
+  /**
+   * Derive full zone config (endpoints included) from a token/org/zone triple, regardless of
+   * whether it came from env scanning or a per-request injected credential.
+   */
+  private buildZoneConfig(
+    zoneName: ZoneId,
+    apiToken: string,
+    organizationName: string,
+    apiVersion?: string
+  ): ZoneConfig {
     // Zone code mapping for endpoint generation
     const zoneCodeMap: Record<ZoneId, string> = {
       sydney: 'syd',
@@ -110,7 +140,7 @@ export class ZoneManager {
       oauthEndpoint,
       apiToken,
       organizationName,
-      apiVersion: process.env.ZETTAGRID_API_VERSION || '39.1'
+      apiVersion: apiVersion || process.env.ZETTAGRID_API_VERSION || '39.1'
     };
   }
 
