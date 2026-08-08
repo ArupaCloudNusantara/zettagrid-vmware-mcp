@@ -1358,26 +1358,25 @@ export class ZettagridClient {
     }
   }
 
-  /** Detect if template name indicates Ubuntu 24.04 or later */
-  private async isUbuntuModernTemplate(templateHref: string, zoneId?: string): Promise<boolean> {
+  /** Detect whether a template is cloud-init-capable by checking the template's OWN inline
+   *  ovf:ProductSection for the same property keys isCloudInitTemplate() checks on a
+   *  caller-supplied config (hostname/password/instance-id/public-keys/user-data). Replaces a
+   *  prior name/description regex ("ubuntu 24", "noble", "oracular", etc.) that only matched
+   *  24.04-or-later strings and missed 18.04/20.04/22.04 entirely — confirmed live 2026-08-06
+   *  that POOL mode on Ubuntu 22.04 deploys with no IP configured, exactly like 24.04, because
+   *  the old regex evaluated false and skipped the MANUAL-over-POOL advisory. Probing the
+   *  template's actual declared OVF properties needs no maintenance as new Ubuntu/Debian-family
+   *  releases ship, unlike a version-string regex. Verified against this org's catalog: 14.04/
+   *  16.04 have zero ProductSection properties (correctly excluded); 18.04/20.04/22.04/24.04/
+   *  26.04 all carry the identical property set. */
+  private async isCloudInitCapableTemplate(templateHref: string, zoneId?: string): Promise<boolean> {
     try {
       const pathMatch = templateHref.match(/\/api(\/.+)/);
       const relativePath = pathMatch?.[1] ?? templateHref;
       const response = await this.makeRequest<string>({ method: 'GET', url: relativePath }, zoneId);
       const xml = response.data as unknown as string;
-
-      // Extract template name and description
-      const nameMatch = xml.match(/<VAppTemplate\b[^>]*name="([^"]+)"/i) || xml.match(/<Name>([^<]+)<\/Name>/);
-      const name = nameMatch?.[1]?.toLowerCase() ?? '';
-
-      const descMatch = xml.match(/<Description>([^<]*)<\/Description>/i);
-      const desc = descMatch?.[1]?.toLowerCase() ?? '';
-
-      const combined = `${name} ${desc}`;
-
-      // Check for Ubuntu 24.04 or later
-      // Patterns: "ubuntu 24", "ubuntu-24", "ubuntu 25", "noble", "oracular"
-      return /ubuntu\s*[2-9][4-9]|ubuntu\D*24\.|ubuntu\D*25\.|noble|oracular/.test(combined);
+      const properties = parseProductSectionProperties(xml);
+      return this.isCloudInitTemplate(properties);
     } catch {
       return false;
     }
@@ -1601,7 +1600,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
    *  network it should be remapped to. Only needed when the two names differ; without a
    *  NetworkAssignment for a differing pair, vCD silently ignores the NIC override and leaves
    *  the VM on its template-original (often nonexistent, in the target VDC) network. */
-  /** Detect whether a VM config's OVF properties indicate a cloud-init template (Ubuntu 24.04+
+  /** Detect whether a VM config's OVF properties indicate a cloud-init template (Ubuntu 18.04+
    *  and similar) rather than one relying on vCD guest customization. Any of these OVF property
    *  keys is a strong signal cloud-init owns configuration and vCD guest customization should
    *  stay out of the way. Single shared source — this exact check used to be copy-pasted
@@ -1643,7 +1642,6 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
     // For cloud-init templates (detected by presence of cloud-init-specific OVF properties),
     // we disable vCD guest customization and rely on cloud-init's user-data instead.
-    // This is more reliable for Ubuntu 24.04+ which uses cloud-init.
     const isCloudInitTemplate = this.isCloudInitTemplate(vmConfig.ovfProperties);
 
     // For cloud-init templates with MANUAL IP mode, user-data will handle network configuration.
@@ -1855,10 +1853,10 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       const wantsNetworkDiscovery = effectiveVmConfigs.length > 0
         && effectiveVmConfigs.every(c => !c.networkConnections?.length);
 
-      // For Ubuntu 24.04+ templates, require explicit network/IP mode specification
+      // For Ubuntu 18.04+ (cloud-init) templates, require explicit network/IP mode specification
       // (prevent accidental broken deployments using template's embedded networks)
       if (wantsNetworkDiscovery) {
-        const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+        const isUbuntuModern = await this.isCloudInitCapableTemplate(templateId, zoneId);
         if (isUbuntuModern) {
           const nets = await getNets();
           // Even if only one network exists, Ubuntu modern requires explicit specification
@@ -1874,12 +1872,12 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
                 gateway: n.defaultGateway,
                 prefix: n.subnetPrefixLength,
               })),
-              instructions: 'For Ubuntu 24.04+, you MUST specify networkConnections in vmConfigs with at least networkName and ipMode (MANUAL is recommended with ipAddress from the network\'s available pool). Calling without network specification will use the template\'s embedded network which may not work correctly.',
+              instructions: 'For Ubuntu 18.04+ (cloud-init), you MUST specify networkConnections in vmConfigs with at least networkName and ipMode (MANUAL is recommended with ipAddress from the network\'s available pool). Calling without network specification will use the template\'s embedded network which may not work correctly.',
             },
             zone,
             {
               code: 'CLARIFICATION_REQUIRED',
-              message: 'Ubuntu 24.04+ detected. Network and IP mode MUST be explicitly specified in vmConfigs.networkConnections — do not rely on auto-discovery. This prevents broken deployments on template embedded networks.',
+              message: 'Ubuntu 18.04+ (cloud-init) detected. Network and IP mode MUST be explicitly specified in vmConfigs.networkConnections — do not rely on auto-discovery. This prevents broken deployments on template embedded networks.',
             }
           );
         }
@@ -1889,9 +1887,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         const nets = await getNets();
 
         if (nets.length > 1) {
-          const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+          const isUbuntuModern = await this.isCloudInitCapableTemplate(templateId, zoneId);
 
-          // For Ubuntu 24.04+, include IP suggestions and recommend DHCP/MANUAL modes
+          // For Ubuntu 18.04+ (cloud-init), include IP suggestions and recommend DHCP/MANUAL modes
           let networkDataForResponse: any[] = nets.map(n => ({
             networkName: n.name,
             networkType: n.linkType === 1 ? 'routed' : n.linkType === 2 ? 'isolated' : 'unknown',
@@ -1899,11 +1897,11 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             totalIps: n.totalIps,
             gateway: n.defaultGateway,
             prefix: n.subnetPrefixLength,
-            // For Ubuntu 24.04+, suggest DHCP only if available; otherwise MANUAL; fall back to DHCP for other templates if IPs available
+            // For Ubuntu 18.04+ (cloud-init), suggest DHCP only if available; otherwise MANUAL; fall back to DHCP for other templates if IPs available
             suggestedIpMode: isUbuntuModern ? 'MANUAL' : (n.availableIps > 0 ? 'POOL' : 'DHCP'),
           }));
 
-          // If Ubuntu 24.04+, add IP suggestions for routed networks and include DHCP pool info
+          // If Ubuntu 18.04+ (cloud-init), add IP suggestions for routed networks and include DHCP pool info
           if (isUbuntuModern) {
             for (let i = 0; i < networkDataForResponse.length; i++) {
               const net = nets[i]!;
@@ -1933,7 +1931,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           }
 
           const clarificationMessage = isUbuntuModern
-            ? `Ubuntu 24.04+ detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode and ipAddress (MANUAL with ipAddress from suggestedIps is RECOMMENDED — netplan will be auto-generated and injected via cloud-init user-data; or DHCP if both DHCP service AND DHCP pools are configured on the network). ⚠️ CRITICAL: DHCP requires BOTH (1) DHCP service enabled AND (2) DHCP pools configured. If either is missing, use MANUAL mode with one of the suggestedIps.`
+            ? `Ubuntu 18.04+ (cloud-init) detected. VDC has ${nets.length} networks. Please specify networkConnections with: networkName (required), ipMode and ipAddress (MANUAL with ipAddress from suggestedIps is RECOMMENDED — netplan will be auto-generated and injected via cloud-init user-data; or DHCP if both DHCP service AND DHCP pools are configured on the network). ⚠️ CRITICAL: DHCP requires BOTH (1) DHCP service enabled AND (2) DHCP pools configured. If either is missing, use MANUAL mode with one of the suggestedIps.`
             : `VDC has ${nets.length} routed networks — please specify networkConnections in vmConfigs (networkName + optionally ipMode). Available options including DHCP availability are in data.availableNetworks. ⚠️ WARNING: DHCP mode requires BOTH active DHCP service AND configured DHCP pools on the network. If unsure, use MANUAL with a specific ipAddress.`;
 
           return this.formatMcpResponse(
@@ -1973,9 +1971,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             );
           }
 
-          // Ubuntu 24.04+ requires MANUAL IP mode instead of POOL (POOL mode enables guest customization
+          // Ubuntu 18.04+ (cloud-init) requires MANUAL IP mode instead of POOL (POOL mode enables guest customization
           // which interferes with cloud-init). For these templates, ask user to choose from suggested IPs.
-          const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+          const isUbuntuModern = await this.isCloudInitCapableTemplate(templateId, zoneId);
 
           if (isUbuntuModern) {
             // Fetch detailed network config to get IP ranges
@@ -1989,7 +1987,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
                   {
                     needsClarification: true,
                     network: net.name,
-                    reason: 'Ubuntu 24.04+ uses cloud-init for network config. MANUAL IP mode with auto-generated netplan is RECOMMENDED.',
+                    reason: 'Ubuntu 18.04+ (cloud-init) uses cloud-init for network config. MANUAL IP mode with auto-generated netplan is RECOMMENDED.',
                     suggestedIps,
                     gateway: netDetail.gateway,
                     subnetMask: netDetail.subnetMask,
@@ -2009,7 +2007,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
                   zone,
                   {
                     code: 'CLARIFICATION_REQUIRED',
-                    message: `Ubuntu 24.04+ detected. Choose a suggested IP for MANUAL mode — netplan will be auto-generated and injected via cloud-init, or select DHCP if available.`,
+                    message: `Ubuntu 18.04+ (cloud-init) detected. Choose a suggested IP for MANUAL mode — netplan will be auto-generated and injected via cloud-init, or select DHCP if available.`,
                   }
                 );
               }
@@ -2044,9 +2042,9 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
         const netMap = new Map(nets.map(n => [n.name, n]));
 
         const exhausted: Array<{ networkName: string; totalIps: number }> = [];
-        const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+        const isUbuntuModern = await this.isCloudInitCapableTemplate(templateId, zoneId);
 
-        // Check if Ubuntu 24.04+ with unresolved ipMode - ask for clarification with IP suggestions
+        // Check if Ubuntu 18.04+ (cloud-init) with unresolved ipMode - ask for clarification with IP suggestions
         if (isUbuntuModern) {
           const unboundNics = resolvedVmConfigs
             .flatMap(c => c.networkConnections?.filter(nc => !nc.ipMode) ?? [])
@@ -2065,7 +2063,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
                 if (suggestedIps.length > 0) {
                   clarifications.push({
                     networkName: nc.networkName,
-                    reason: 'Ubuntu 24.04+ requires MANUAL IP mode instead of POOL (POOL mode interferes with cloud-init)',
+                    reason: 'Ubuntu 18.04+ (cloud-init) requires MANUAL IP mode instead of POOL (POOL mode interferes with cloud-init)',
                     suggestedIps,
                     gateway: netDetail.gateway,
                     subnetMask: netDetail.subnetMask,
@@ -2095,7 +2093,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
                 zone,
                 {
                   code: 'CLARIFICATION_REQUIRED',
-                  message: `Ubuntu 24.04+ detected. MANUAL mode with suggestedIps is recommended. Avoid POOL. Use DHCP only if DHCP server is confirmed running on the network.`,
+                  message: `Ubuntu 18.04+ (cloud-init) detected. MANUAL mode with suggestedIps is recommended. Avoid POOL. Use DHCP only if DHCP server is confirmed running on the network.`,
                 }
               );
             }
@@ -2108,7 +2106,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             if (nc.ipMode) return nc;
             const info = netMap.get(nc.networkName);
             if (info && info.availableIps > 0) {
-              // Ubuntu 24.04+ should default to DHCP instead of POOL when IP mode is unspecified
+              // Ubuntu 18.04+ (cloud-init) should default to DHCP instead of POOL when IP mode is unspecified
               const ipMode = isUbuntuModern ? ('DHCP' as const) : ('POOL' as const);
               return { ...nc, ipMode };
             }
@@ -2438,22 +2436,22 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       // Resolve missing ipMode on network connections
       const hasUnresolvedIpMode = finalVmConfig.networkConnections?.some(nc => !nc.ipMode);
       if (hasUnresolvedIpMode) {
-        // Check if template is Ubuntu 24.04+ which requires MANUAL instead of POOL
-        const isUbuntuModern = await this.isUbuntuModernTemplate(templateId, zoneId);
+        // Check if template is Ubuntu 18.04+ (cloud-init) which requires MANUAL instead of POOL
+        const isUbuntuModern = await this.isCloudInitCapableTemplate(templateId, zoneId);
 
         if (vdcId) {
           const nets = await this.fetchVdcNetworkOptions(vdcId, zoneId);
           const netMap = new Map(nets.map(n => [n.name, n]));
           const exhausted: Array<{ networkName: string; totalIps: number; networkHref?: string }> = [];
 
-          // For Ubuntu 24.04+, ask user to choose IP instead of defaulting to POOL/DHCP
+          // For Ubuntu 18.04+ (cloud-init), ask user to choose IP instead of defaulting to POOL/DHCP
           const ubuntuNicsNeedingIp: Array<{ nic: VAppNetworkConnection; networkInfo: typeof nets[0] }> = [];
           const resolvedNics: VAppNetworkConnection[] = finalVmConfig.networkConnections!.map(nc => {
             if (nc.ipMode) return nc;
             const info = netMap.get(nc.networkName);
             if (info && info.availableIps > 0) {
               if (isUbuntuModern) {
-                // For Ubuntu 24.04+, collect NICs that need IP selection
+                // For Ubuntu 18.04+ (cloud-init), collect NICs that need IP selection
                 ubuntuNicsNeedingIp.push({ nic: nc, networkInfo: info });
                 return nc; // Return unresolved for now
               }
@@ -2464,7 +2462,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             return nc;
           });
 
-          // If Ubuntu 24.04+ with available IPs, suggest IPs to user
+          // If Ubuntu 18.04+ (cloud-init) with available IPs, suggest IPs to user
           if (isUbuntuModern && ubuntuNicsNeedingIp.length > 0) {
             const suggestedIpsByNetwork: Record<string, { suggestedIps: string[]; gateway?: string; subnetMask?: string; dhcpAvailable?: boolean }> = {};
 
@@ -2489,7 +2487,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
                   needsClarification: true,
                   vappId,
                   vmName,
-                  reason: 'Ubuntu 24.04+ requires MANUAL IP mode instead of POOL (POOL mode interferes with cloud-init)',
+                  reason: 'Ubuntu 18.04+ (cloud-init) requires MANUAL IP mode instead of POOL (POOL mode interferes with cloud-init)',
                   suggestedIpsByNetwork,
                   options: [
                     {
@@ -2506,7 +2504,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
                 zone,
                 {
                   code: 'CLARIFICATION_REQUIRED',
-                  message: `Ubuntu 24.04+ detected. Please choose IP addresses from the suggestions for MANUAL mode configuration, or use DHCP mode.`,
+                  message: `Ubuntu 18.04+ (cloud-init) detected. Please choose IP addresses from the suggestions for MANUAL mode configuration, or use DHCP mode.`,
                 }
               );
             }
@@ -2536,7 +2534,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
 
           finalVmConfig = { ...finalVmConfig, networkConnections: resolvedNics };
         } else {
-          // No vdcId — default unresolved NICs to POOL (or DHCP for Ubuntu 24.04+)
+          // No vdcId — default unresolved NICs to POOL (or DHCP for Ubuntu 18.04+ (cloud-init))
           const defaultIpMode: 'DHCP' | 'POOL' = isUbuntuModern ? 'DHCP' : 'POOL';
           const resolvedNics: VAppNetworkConnection[] = (finalVmConfig.networkConnections ?? []).map(nc => ({
             ...nc,
