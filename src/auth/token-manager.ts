@@ -3,8 +3,8 @@
  * Handles API token authentication and session management for vCloud Director
  */
 
-import { createHash } from 'node:crypto';
 import { AuthToken, AuthSession, ZoneConfig } from '../types.js';
+import { hashCredential } from '../lib/credential-hash.js';
 
 // Module-level, not per-instance: ZettagridClient constructs a fresh TokenManager on every
 // HTTP request, which would otherwise defeat this cache entirely and re-run the OAuth
@@ -42,9 +42,7 @@ export class TokenManager {
    * hand their access token to everyone else hitting the same zone/org.
    */
   private sessionKey(zoneConfig: ZoneConfig): string {
-    return createHash('sha256')
-      .update(`${zoneConfig.apiToken}:${zoneConfig.organizationName}:${zoneConfig.name}`)
-      .digest('hex');
+    return hashCredential(zoneConfig.apiToken, zoneConfig.organizationName, zoneConfig.name);
   }
 
   /**

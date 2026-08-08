@@ -9,6 +9,7 @@
 
 import { IncomingHttpHeaders } from 'node:http';
 import { InjectedZoneCredentials, ZoneId } from '../types.js';
+import { hashCredential } from '../lib/credential-hash.js';
 
 const VALID_ZONES: ZoneId[] = [
   'sydney', 'melbourne', 'perth', 'brisbane', 'adelaide', 'darwin', 'jakarta', 'cibitung'
@@ -27,7 +28,7 @@ export interface CredentialExtractionError {
 }
 
 export type CredentialExtractionResult =
-  | { credentials: InjectedZoneCredentials }
+  | { credentials: InjectedZoneCredentials; credentialHash: string }
   | { error: CredentialExtractionError };
 
 function firstHeaderValue(value: string | string[] | undefined): string | undefined {
@@ -77,5 +78,6 @@ export function extractZoneCredentials(headers: IncomingHttpHeaders): Credential
     };
   }
 
-  return { credentials: { apiToken, organizationName, zone: zone as ZoneId } };
+  const credentials: InjectedZoneCredentials = { apiToken, organizationName, zone: zone as ZoneId };
+  return { credentials, credentialHash: hashCredential(apiToken, organizationName, zone) };
 }
