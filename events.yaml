@@ -1,0 +1,8 @@
+# Upcoming events where the demo channel needs to be stable.
+# The freeze-check job blocks demo promotions within FREEZE_HOURS (default 48h)
+# of any date listed here, unless override_freeze=true is passed.
+#
+# Add an entry whenever an event is scheduled. Use ISO 8601 with the WIB offset.
+events:
+  - name: "Example: GovTech Expo Jakarta"
+    date: "2026-09-15T09:00:00+07:00"

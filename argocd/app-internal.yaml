@@ -1,0 +1,18 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: zettagrid-mcp-internal
+  namespace: argocd
+spec:
+  project: zettagrid-mcp
+  source:
+    repoURL: https://github.com/ArupaCloudNusantara/zettagrid-vmware-mcp.git
+    targetRevision: main
+    path: k8s/apps/internal
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: zettagrid-mcp
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
