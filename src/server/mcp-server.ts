@@ -152,6 +152,27 @@ export class ZettagridMcpServer {
   }
 
   /**
+   * list_external_networks / get_provider_network_info require a provider-scope VCD token.
+   * A tenant token gets an HTTP 403 ("This operation is denied") straight from vCD, which
+   * reads like a transient failure worth retrying rather than the expected, permanent result
+   * of calling a provider-only endpoint with tenant credentials. Rewrite it into an explicit,
+   * actionable message instead of passing the raw 403 through.
+   */
+  private withProviderScopeHint(result: McpToolResponse, toolName: string): McpToolResponse {
+    if (result.success === false && result.error?.message?.includes('HTTP 403')) {
+      return {
+        ...result,
+        error: {
+          ...result.error,
+          code: 'PROVIDER_SCOPE_REQUIRED',
+          message: `'${toolName}' requires a provider-scope VCD API token. The token used here is tenant-scoped, and vCD denied the request (HTTP 403) — this is expected for a tenant token, not a bug to retry.`
+        }
+      };
+    }
+    return result;
+  }
+
+  /**
    * Initialize the MCP server with all tool handlers
    */
   async initialize(): Promise<void> {
@@ -1622,11 +1643,17 @@ export class ZettagridMcpServer {
             break;
 
           case 'list_external_networks':
-            result = await this.client.listExternalNetworks(args?.zoneId as string | undefined);
+            result = this.withProviderScopeHint(
+              await this.client.listExternalNetworks(args?.zoneId as string | undefined),
+              name
+            );
             break;
 
           case 'get_provider_network_info':
-            result = await this.client.getProviderNetworkInfo(args?.zoneId as string | undefined);
+            result = this.withProviderScopeHint(
+              await this.client.getProviderNetworkInfo(args?.zoneId as string | undefined),
+              name
+            );
             break;
 
           case 'get_vm':
