@@ -1819,7 +1819,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           const itemResp = await this.makeRequest<string>({ method: 'GET', url: `/catalogItem/${uuid}` }, zoneId);
           const entityMatch = String(itemResp.data).match(/<Entity\b[^>]*href="([^"]*vAppTemplate[^"]*)"[^>]*>/i);
           if (entityMatch?.[1]) templateId = entityMatch[1];
-        } catch {}
+        } catch { /* not a catalogItem href, or resolution failed — keep original templateId */ }
       }
 
       // Legacy: map old guestCustomization into vmConfigs[0]
@@ -1916,7 +1916,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           const isUbuntuModern = await this.isCloudInitCapableTemplate(templateId, zoneId);
 
           // For Ubuntu 18.04+ (cloud-init), include IP suggestions and recommend DHCP/MANUAL modes
-          let networkDataForResponse: any[] = nets.map(n => ({
+          const networkDataForResponse: any[] = nets.map(n => ({
             networkName: n.name,
             networkType: n.linkType === 1 ? 'routed' : n.linkType === 2 ? 'isolated' : 'unknown',
             availableIps: n.availableIps,
@@ -2423,7 +2423,7 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
           const itemResp = await this.makeRequest<string>({ method: 'GET', url: `/catalogItem/${uuid}` }, zoneId);
           const entityMatch = String(itemResp.data).match(/<Entity\b[^>]*href="([^"]*vAppTemplate[^"]*)"[^>]*>/i);
           if (entityMatch?.[1]) templateId = entityMatch[1];
-        } catch {}
+        } catch { /* not a catalogItem href, or resolution failed — keep original templateId */ }
       }
 
       // Resolve the first VM href from the template

@@ -1356,7 +1356,7 @@ export class ZettagridMcpServer {
         switch (name) {
           case 'get_server_version': {
             // Get version from package.json and git commit hash
-            let version = '1.3.0'; // fallback
+            const version = '1.4.0'; // fallback, matches package.json — kept in sync manually
             let buildNumber = 'unknown';
 
             try {
