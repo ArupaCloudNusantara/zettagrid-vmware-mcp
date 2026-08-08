@@ -28,10 +28,10 @@ This directory contains example scripts demonstrating various features of the Ze
 ### Basic Usage
 ```bash
 # Run connectivity test
-npx tsx src/examples/connectivity-test.ts
+npx tsx scripts/connectivity-test.ts
 
 # Run complete VM test
-npx tsx src/examples/complete-vm-test.ts
+npx tsx scripts/complete-vm-test.ts
 ```
 
 ### Environment Setup

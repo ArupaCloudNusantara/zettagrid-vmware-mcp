@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * Test all currently available MCP tools in Perth zone
- * Usage: npx tsx src/examples/test-available-tools.ts
+ * Usage: npx tsx scripts/test-available-tools.ts
  */
 
 import { ZettagridClient } from '../client/zettagrid-client.js';

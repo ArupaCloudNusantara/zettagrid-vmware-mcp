@@ -17,7 +17,7 @@
     "lint": "eslint src --ext .ts",
     "lint:fix": "eslint src --ext .ts --fix",
     "clean": "rm -rf build",
-    "test:connectivity": "tsx src/examples/connectivity-test.ts"
+    "test:connectivity": "tsx scripts/connectivity-test.ts"
   },
   "keywords": [
     "zettagrid",
@@ -33,7 +33,7 @@
     "cibitung",
     "multi-zone"
   ],
-  "author": "Zettagrid (original), community fork maintainer",
+  "author": "Zettagrid Indonesia",
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.12.0",
@@ -63,10 +63,10 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/YOUR-GITHUB-USERNAME/zettagrid-vmware-mcp-id.git"
+    "url": "https://github.com/ArupaCloudNusantara/zettagrid-vmware-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR-GITHUB-USERNAME/zettagrid-vmware-mcp-id/issues"
+    "url": "https://github.com/ArupaCloudNusantara/zettagrid-vmware-mcp/issues"
   },
-  "homepage": "https://github.com/YOUR-GITHUB-USERNAME/zettagrid-vmware-mcp-id#readme"
+  "homepage": "https://github.com/ArupaCloudNusantara/zettagrid-vmware-mcp#readme"
 }

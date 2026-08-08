@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * Test VM Console functionality
- * Usage: npx tsx src/examples/test-vm-console.ts <vmId> [zoneId]
+ * Usage: npx tsx scripts/test-vm-console.ts <vmId> [zoneId]
  */
 
 import { ZettagridClient } from '../client/zettagrid-client.js';
@@ -69,9 +69,9 @@ async function testVMConsole(vmId: string, zoneId?: string) {
 // Parse command line arguments
 const args = process.argv.slice(2);
 if (args.length < 1) {
-  console.error('❌ Usage: npx tsx src/examples/test-vm-console.ts <vmId> [zoneId]');
-  console.error('   Example: npx tsx src/examples/test-vm-console.ts vm-12345');
-  console.error('   Example: npx tsx src/examples/test-vm-console.ts vm-12345 sydney');
+  console.error('❌ Usage: npx tsx scripts/test-vm-console.ts <vmId> [zoneId]');
+  console.error('   Example: npx tsx scripts/test-vm-console.ts vm-12345');
+  console.error('   Example: npx tsx scripts/test-vm-console.ts vm-12345 sydney');
   process.exit(1);
 }
 
