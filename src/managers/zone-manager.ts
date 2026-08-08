@@ -118,7 +118,7 @@ export class ZoneManager {
       adelaide: 'adl',
       darwin: 'dar',
       jakarta: 'jkt',
-      cibitung: 'cbt'   // NOTE: zone code assumed — confirm with Zettagrid Indonesia support
+      cibitung: 'cbt'   // Confirmed with Zettagrid Indonesia support
     };
 
     // Indonesia zones use a different domain (.zettagrid.id) and URL separator (-) vs AU (.zettagrid.com, .)

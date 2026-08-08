@@ -358,7 +358,7 @@ rather write your own.
 | Zone | Code | Endpoint |
 |------|------|----------|
 | Jakarta | `jkt` | `https://mycloud-jkt.zettagrid.id/api` |
-| Cibitung | `cbt` | `https://mycloud-cbt.zettagrid.id/api` (zone code assumed — confirm with Zettagrid Indonesia) |
+| Cibitung | `cbt` | `https://mycloud-cbt.zettagrid.id/api` |
 
 ### Stubs fixed
 
