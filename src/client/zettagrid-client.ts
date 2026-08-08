@@ -1853,6 +1853,32 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
       const wantsNetworkDiscovery = effectiveVmConfigs.length > 0
         && effectiveVmConfigs.every(c => !c.networkConnections?.length);
 
+      // The auto-discovery/unresolved-ipMode advisories below only catch POOL mode when ipMode
+      // is left unspecified. A caller (or an agent acting on stale advice) can bypass all of
+      // that by passing ipMode: 'POOL' explicitly, which silently deploys cloud-init templates
+      // with no IP configured at all — confirmed live on Ubuntu 22.04/24.04, not degraded,
+      // actually broken. Block that combination directly, before the auto-discovery branches.
+      const explicitPoolConnections = effectiveVmConfigs.flatMap(c =>
+        (c.networkConnections ?? []).filter(nc => nc.ipMode === 'POOL')
+      );
+      if (explicitPoolConnections.length > 0) {
+        const isCloudInitCapable = await this.isCloudInitCapableTemplate(templateId, zoneId);
+        if (isCloudInitCapable) {
+          return this.formatMcpResponse(
+            {
+              needsClarification: true,
+              isUbuntuModern: true,
+              rejectedNetworks: explicitPoolConnections.map(nc => nc.networkName),
+            },
+            zone,
+            {
+              code: 'CLARIFICATION_REQUIRED',
+              message: `ipMode: 'POOL' was explicitly requested for network(s) ${explicitPoolConnections.map(nc => `"${nc.networkName}"`).join(', ')}, but this template uses cloud-init, which POOL mode is incompatible with — POOL enables vCD guest customization, which conflicts with cloud-init's own network configuration and deploys with no IP address at all. Use ipMode: 'MANUAL' with an explicit ipAddress (recommended), or 'DHCP' only if a DHCP server is confirmed active on the network.`,
+            }
+          );
+        }
+      }
+
       // For Ubuntu 18.04+ (cloud-init) templates, require explicit network/IP mode specification
       // (prevent accidental broken deployments using template's embedded networks)
       if (wantsNetworkDiscovery) {
@@ -2428,6 +2454,30 @@ ${gateway ? `      gateway4: ${gateway}` : ''}
             {
               code: 'CLARIFICATION_REQUIRED',
               message: `This vApp has ${existingVappNetworks.length} networks configured (${existingVappNetworks.join(', ')}) — specify networkConnections (networkName + optionally ipMode) so the new VM connects to the right one.`,
+            }
+          );
+        }
+      }
+
+      // A caller can bypass the unresolved-ipMode advisory below by passing ipMode: 'POOL'
+      // explicitly, which silently deploys cloud-init templates with no IP configured at all
+      // (confirmed live on Ubuntu 22.04/24.04). Block that combination directly.
+      const explicitPoolConnections = (finalVmConfig.networkConnections ?? []).filter(nc => nc.ipMode === 'POOL');
+      if (explicitPoolConnections.length > 0) {
+        const isCloudInitCapable = await this.isCloudInitCapableTemplate(templateId, zoneId);
+        if (isCloudInitCapable) {
+          return this.formatMcpResponse(
+            {
+              needsClarification: true,
+              vappId,
+              vmName,
+              isUbuntuModern: true,
+              rejectedNetworks: explicitPoolConnections.map(nc => nc.networkName),
+            },
+            zone,
+            {
+              code: 'CLARIFICATION_REQUIRED',
+              message: `ipMode: 'POOL' was explicitly requested for network(s) ${explicitPoolConnections.map(nc => `"${nc.networkName}"`).join(', ')}, but this template uses cloud-init, which POOL mode is incompatible with — POOL enables vCD guest customization, which conflicts with cloud-init's own network configuration and deploys with no IP address at all. Use ipMode: 'MANUAL' with an explicit ipAddress (recommended), or 'DHCP' only if a DHCP server is confirmed active on the network.`,
             }
           );
         }
