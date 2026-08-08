@@ -88,9 +88,9 @@ async function handleMcpRequest(req: Request, res: Response, readOnly: boolean):
     await transport.handleRequest(req, res, req.body);
   } catch (error) {
     logAudit({
-      credentialHashPrefix: extraction.credentialHash.slice(0, 12),
-      organization: extraction.credentials.organizationName,
-      zone: extraction.credentials.zone,
+      credentialHashPrefix: extraction.credentialHash === 'env' ? 'env' : extraction.credentialHash.slice(0, 12),
+      organization: extraction.credentials?.organizationName ?? 'env',
+      zone: extraction.credentials?.zone ?? (process.env.ZETTAGRID_DEFAULT_ZONE ?? 'default'),
       tool: 'transport',
       outcome: 'error',
       durationMs: 0,
@@ -108,9 +108,10 @@ async function handleMcpRequest(req: Request, res: Response, readOnly: boolean):
 async function runHttp(): Promise<void> {
   console.error('Starting Zettagrid VMware MCP Server (HTTP)...');
   console.error(
-    'WARNING: this transport is plaintext HTTP. Credentials travel in headers on every ' +
-    'request — do not expose this port beyond a TLS-terminating reverse proxy or a trusted ' +
-    'private network (Tailscale/VPN). See compose.yml — it must stay bound to loopback.'
+    'WARNING: this transport is plaintext HTTP. If callers pass X-VCD-Token/-Org/-Zone ' +
+    'headers, that credential travels in plaintext on every request — do not expose this ' +
+    'port beyond a TLS-terminating reverse proxy or a trusted private network (Tailscale/VPN). ' +
+    'See compose.yml — it must stay bound to loopback.'
   );
 
   const app = express();

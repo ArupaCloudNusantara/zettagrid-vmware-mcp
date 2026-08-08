@@ -1,10 +1,20 @@
 /**
- * HTTP credential extraction for multi-tenant mode.
+ * HTTP credential extraction.
  *
- * The HTTP transport is a stateless relay: every caller supplies their own VCD credentials
- * per request via headers, rather than the server holding one set of credentials for
- * everyone (as the env-scanned stdio path does). Nothing here is stored — extraction just
- * validates and shapes what's on the wire into InjectedZoneCredentials.
+ * Two supported modes, chosen per request:
+ *  - Multi-tenant: caller supplies X-VCD-Token/X-VCD-Org/X-VCD-Zone, and the server relays to
+ *    that caller's own VCD identity. Nothing here is stored — extraction just validates and
+ *    shapes what's on the wire into InjectedZoneCredentials.
+ *  - Self-hosted single-tenant: no X-VCD-* headers at all, in which case the server falls back
+ *    to the same env-scanned credentials stdio mode uses. This is the pre-existing behavior
+ *    the public self-hosting docs describe (`cp .env.example`, `docker compose up`, hit
+ *    `/mcp`) — it must keep working with zero headers, since that flow predates the
+ *    header-based mode and self-hosting customers were never told headers exist.
+ *
+ * Partial headers (e.g. token present but org missing) are treated as a caller who *meant* to
+ * use header-based auth and got it wrong — that's a 401, not a silent fallback, since silently
+ * using env credentials in that case could paper over a misconfigured client and use the wrong
+ * identity without anyone noticing.
  */
 
 import { IncomingHttpHeaders } from 'node:http';
@@ -29,6 +39,7 @@ export interface CredentialExtractionError {
 
 export type CredentialExtractionResult =
   | { credentials: InjectedZoneCredentials; credentialHash: string }
+  | { credentials: undefined; credentialHash: 'env' }
   | { error: CredentialExtractionError };
 
 function firstHeaderValue(value: string | string[] | undefined): string | undefined {
@@ -42,11 +53,19 @@ export function extractZoneCredentials(headers: IncomingHttpHeaders): Credential
   const organizationName = firstHeaderValue(headers['x-vcd-org']);
   const zone = firstHeaderValue(headers['x-vcd-zone']);
 
+  if (!apiToken && !organizationName && !zone) {
+    // No X-VCD-* headers at all — fall back to the server's own env-scanned credentials,
+    // exactly like stdio mode. Preserves the pre-existing self-hosted Docker+.env flow.
+    return { credentials: undefined, credentialHash: 'env' };
+  }
+
   if (!apiToken || !organizationName || !zone) {
     return {
       error: {
         status: 401,
-        message: 'Missing required headers: X-VCD-Token, X-VCD-Org, and X-VCD-Zone are all required.'
+        message: 'Partial X-VCD-* headers received — X-VCD-Token, X-VCD-Org, and X-VCD-Zone ' +
+          'must all be present together to use per-request credentials, or all omitted to use ' +
+          "this server's own environment credentials."
       }
     };
   }
