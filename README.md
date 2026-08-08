@@ -1,6 +1,6 @@
 # Zettagrid VMware MCP Server — Indonesia Edition
 
-Maintained by **Zettagrid Indonesia**.
+Maintained by **Zettagrid Indonesia**, a brand of PT Arupa Cloud Nusantara.
 
 Derived from [Zettagrid/zettagrid-vmware-mcp](https://github.com/Zettagrid/zettagrid-vmware-mcp) v1.0.0.
 This edition adds Indonesian zones (Jakarta, Cibitung), expands the tool set from 20 to 56,
