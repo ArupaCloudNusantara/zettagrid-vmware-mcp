@@ -16,3 +16,9 @@ spec:
     automated:
       prune: true
       selfHeal: true
+    syncOptions:
+      # Neither app's source path includes k8s/namespace.yaml (they only sync
+      # k8s/apps/{internal,demo}), so without this the first sync fails with
+      # "namespace not found" — found while double-checking readiness for a real
+      # Argo CD install, not caught in the original integration pass.
+      - CreateNamespace=true

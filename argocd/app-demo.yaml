@@ -14,4 +14,9 @@ spec:
     namespace: zettagrid-mcp
   # No automated block: this channel only moves when promote-demo.yml
   # explicitly runs `argocd app sync`. Never point this at `latest`.
-  syncPolicy: {}
+  syncPolicy:
+    syncOptions:
+      # CreateNamespace is safe here even though `internal` usually creates the
+      # namespace first — idempotent, and this app shouldn't depend on sync order
+      # against the other one.
+      - CreateNamespace=true
