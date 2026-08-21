@@ -6,6 +6,56 @@ This project follows [Semantic Versioning](https://semver.org/).
 
 ---
 
+## [1.5.0] — 2026-08-21
+
+Multi-tenant HTTP transport with per-request credentials, security hardening for the internal
+centralized deployment, two real bug fixes around cloud-init/POOL IP mode, repository/brand
+cleanup, and a new CI/CD pipeline (GitHub Actions + Argo CD).
+
+### Added
+- HTTP transport now supports multiple simultaneous callers with distinct VCD credentials via
+  `X-VCD-Token`/`X-VCD-Org`/`X-VCD-Zone` headers — a stateless relay, no credentials stored
+  server-side. Absent headers fall back to the existing env-scanned credentials, so stdio and
+  single-org `.env`-based self-hosted deployments are completely unaffected.
+- `POST /mcp/readonly` — lists and permits only `list_`/`get_`/`show_`/`test_`-prefixed tools,
+  explicitly excluding `get_vm_console` (it returns a live console bearer credential despite
+  the prefix).
+- Per-credential-hash rate limiting (60/min default, `ZETTAGRID_RATE_LIMIT_PER_MINUTE`
+  override) and structured JSON audit logging per tool call (credential hash prefix, org, zone,
+  tool, outcome, duration — never the token).
+- CI/CD pipeline: GitHub Actions (lint, build, CodeQL, `npm audit`, ghcr.io image publish) and
+  Argo CD GitOps across two Kubernetes release channels — `internal` auto-deploys on every
+  merge to `main`; `demo` only moves via a deliberate tag promotion behind a 48-hour pre-event
+  freeze check, and never auto-syncs.
+- ESLint configuration — `npm run lint` referenced ESLint since the project's inception but had
+  no config for it anywhere.
+- Bahasa Indonesia self-hosting quickstart (`docs/self-host-id.md`).
+
+### Fixed
+- `TokenManager`'s session cache was keyed by zone+org name only, so two different callers
+  hitting the same zone/org could silently share whoever authenticated first's access token.
+  Rekeyed to a hash of the actual credential; the cache also now persists across per-request
+  client construction instead of re-running the OAuth handshake on every tool call.
+- Cloud-init detection (`isUbuntuModernTemplate`) matched only "Ubuntu 24.04 or later"
+  name/description patterns, missing 18.04/20.04/22.04 entirely — POOL IP mode on those
+  templates deployed with no IP address configured at all, a live-reported and fully broken
+  deployment, not just a suboptimal one. Replaced with a check against the template's own
+  declared OVF properties, which needs no per-release-version maintenance.
+- The same advisory only fired when `ipMode` was left unspecified — a caller explicitly passing
+  `ipMode: 'POOL'` bypassed it entirely. Closed that gap too.
+- `list_external_networks`/`get_provider_network_info` returned a raw HTTP 403 for
+  tenant-scoped tokens; now return an explicit `PROVIDER_SCOPE_REQUIRED` message.
+- Removed three unused firewall-manager prototypes (excluded from the TypeScript build,
+  unreferenced anywhere) and their two dependent example scripts.
+
+### Changed
+- README repositioned: "Zettagrid Indonesia" branding (a brand of PT Arupa Cloud Nusantara),
+  corrected placeholder clone/repository URLs, new self-hosting section, reconciled the stale
+  "tests not included" claim against the real `tests/` suite.
+- Remaining example/debug scripts moved from `src/examples/` to `scripts/`.
+
+---
+
 ## [1.4.0] — 2026-08-05
 
 Guest customization reliability (Windows and cloud-init), a live user-reported password/XML
