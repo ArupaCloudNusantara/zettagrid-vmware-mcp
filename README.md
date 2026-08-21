@@ -1,7 +1,11 @@
-# Zettagrid VMware MCP Server
+# Zettagrid VMware MCP Server — Indonesia Edition
 
-> **Community fork** of [Zettagrid/zettagrid-vmware-mcp](https://github.com/Zettagrid/zettagrid-vmware-mcp) v1.0.0.  
-> Fork version: **v1.1.0** — 56 tools, Indonesia zones (Jakarta, Cibitung), full firewall/NAT CRUD, VM resize/network/disk/hostname, vApp delete/undeploy/add-vm, application port profiles, task polling, Docker transport. All original Australian zones and tools are fully preserved.
+Maintained by **Zettagrid Indonesia**, a brand of PT Arupa Cloud Nusantara.
+
+Derived from [Zettagrid/zettagrid-vmware-mcp](https://github.com/Zettagrid/zettagrid-vmware-mcp) v1.0.0.
+This edition adds Indonesian zones (Jakarta, Cibitung), expands the tool set from 20 to 56,
+adds full firewall/NAT CRUD, VM resize/network/disk/hostname operations, task polling, and
+HTTP transport. All original Australian zones and tools are preserved.
 
 A Model Context Protocol (MCP) server for managing VMware Cloud Director (VCD 10.5) infrastructure through AI assistants such as Claude. Covers the full tenant lifecycle: read, create, modify, delete across vApps, VMs, firewall, NAT, snapshots, and tasks.
 
@@ -30,13 +34,28 @@ Configure only the zones you have access to. The server starts up cleanly with a
 API tokens are issued per zone via the Zettagrid customer portal.
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/zettagrid-vmware-mcp.git
+git clone https://github.com/ArupaCloudNusantara/zettagrid-vmware-mcp.git
 cd zettagrid-vmware-mcp
 npm install
 cp .env.example .env   # edit with your credentials
 npm run build
 npm start
 ```
+
+---
+
+## Self-Hosting
+
+This is the intended deployment model: **each organization runs its own instance against its
+own VCD**, not a shared hosted service operated by Zettagrid Indonesia.
+
+- Credentials stay within your own environment and are never transmitted to Zettagrid
+  Indonesia — the server talks directly to your Zettagrid VCD endpoint.
+- Tool authorization is governed entirely by the VCD role attached to your API token; the
+  server grants nothing beyond what the token already permits.
+- For a guided walkthrough in Bahasa Indonesia (obtaining a token, configuring `.env`,
+  registering with Claude Desktop/Claude Code, verifying connectivity), see
+  [`docs/self-host-id.md`](docs/self-host-id.md).
 
 ---
 
@@ -323,18 +342,23 @@ curl -s -X POST \
 
 ## Testing
 
-This server uses live integration tests against real VCD infrastructure. Tests are not included in the public release — write your own against your VDC using the tool reference above. All tools follow the same request/response pattern; see `.env.example` for the environment variables.
+This server uses live integration tests against real VCD infrastructure. The Jest-based
+regression suite lives in [`tests/`](tests/) (see `tests/README.md`) — it spawns the MCP
+server as a stdio subprocess and exercises it against a real VDC, so running it requires your
+own Zettagrid credentials in `tests/config.js`. There is no mocked/offline test mode; all tools
+follow the same request/response pattern documented in the tool reference above if you'd
+rather write your own.
 
 ---
 
-## Fork Changes from Upstream
+## Changes from Upstream v1.0.0
 
 ### Indonesia zones (new)
 
 | Zone | Code | Endpoint |
 |------|------|----------|
 | Jakarta | `jkt` | `https://mycloud-jkt.zettagrid.id/api` |
-| Cibitung | `cbt` | `https://mycloud-cbt.zettagrid.id/api` (zone code assumed — confirm with Zettagrid Indonesia) |
+| Cibitung | `cbt` | `https://mycloud-cbt.zettagrid.id/api` |
 
 ### Stubs fixed
 
@@ -385,6 +409,12 @@ Relevant to anyone extending this server against VCD 10.5 / NSX-T:
 
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT — see [LICENSE](LICENSE). Upstream copyright retained; additions
+copyright © PT Arupa Cloud Nusantara.
 
-This project is not officially supported by Zettagrid and is provided without warranty.
+Maintained by Zettagrid Indonesia. Provided as-is, without warranty.
+
+This software is not part of any Zettagrid service offering and is not covered
+by Zettagrid support SLAs. For problems with this software, open a GitHub issue.
+For problems with your Zettagrid service, contact Zettagrid support through your
+normal channel.

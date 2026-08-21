@@ -63,7 +63,9 @@ src-tauri/target/
 # Claude Code settings
 .claude/
 
-# Markdown files (except README.md)
+# Markdown files (except README.md and the public self-host quickstart)
+# Internal-only docs (ops runbooks, planning docs) stay local, not in the repo.
 *.md
 !README.md
 !CHANGELOG.md
+!docs/self-host-id.md

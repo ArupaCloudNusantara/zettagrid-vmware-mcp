@@ -1,0 +1,66 @@
+name: Promote to Demo
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag to promote (git short SHA or vX.Y.Z) — must already exist in ghcr.io"
+        required: true
+      override_freeze:
+        description: "Override the pre-event freeze window? Use only for a tested hotfix."
+        required: false
+        default: "false"
+
+permissions:
+  contents: write
+
+jobs:
+  freeze-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - name: Check freeze window against events.yaml
+        run: node scripts/check-freeze.mjs "${{ github.event.inputs.override_freeze }}"
+
+  promote:
+    needs: freeze-check
+    # Requires a self-hosted runner with a network path to the Harvester-hosted
+    # cluster / Argo CD API. GitHub-hosted runners cannot reach internal infra.
+    runs-on: [self-hosted, internal]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pin demo channel to promoted tag
+        run: |
+          cd k8s/apps/demo
+          sed -i "s|newTag:.*|newTag: ${{ github.event.inputs.image_tag }}|" kustomization.yaml
+          git config user.name "ci-bot"
+          git config user.email "ci-bot@arupa.id"
+          git commit -am "chore(demo): promote to ${{ github.event.inputs.image_tag }}"
+          git push
+
+      - name: Sync Argo CD demo application
+        run: |
+          argocd app sync zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER"
+          argocd app wait zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER" --health
+        env:
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+
+      - name: Smoke test demo deployment
+        run: node scripts/smoke-test.mjs "$DEMO_MCP_ENDPOINT"
+        env:
+          DEMO_MCP_ENDPOINT: ${{ secrets.DEMO_MCP_ENDPOINT }}
+
+      - name: Roll back on smoke test failure
+        if: failure()
+        run: |
+          argocd app rollback zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER"
+        env:
+          ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
+          ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}

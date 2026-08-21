@@ -1,0 +1,25 @@
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: zettagrid-mcp
+  namespace: argocd
+spec:
+  sourceRepos:
+    - https://github.com/ArupaCloudNusantara/zettagrid-vmware-mcp.git
+  destinations:
+    - namespace: zettagrid-mcp
+      server: https://kubernetes.default.svc
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  # Optional extra safety net for recurring blackout periods (e.g. a conference
+  # season that repeats every year). This is cron-based and not per-event, so
+  # it complements — doesn't replace — the events.yaml freeze-check in CI,
+  # which is what actually knows specific event dates.
+  # syncWindows:
+  #   - kind: deny
+  #     schedule: "0 0 1 9 *"
+  #     duration: 48h
+  #     applications:
+  #       - zettagrid-mcp-demo
+  #     manualSync: false

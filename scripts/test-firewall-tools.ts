@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * Test firewall tools in Perth zone
- * Usage: npx tsx src/examples/test-firewall-tools.ts
+ * Usage: npx tsx scripts/test-firewall-tools.ts
  */
 
 import { ZettagridClient } from '../client/zettagrid-client.js';

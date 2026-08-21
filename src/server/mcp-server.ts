@@ -14,14 +14,30 @@ import {
 import * as yaml from 'js-yaml';
 
 import { ZettagridClient } from '../client/zettagrid-client.js';
-import { McpToolResponse, VdcResourceSummary } from '../types.js';
+import { McpToolResponse, VdcResourceSummary, InjectedZoneCredentials } from '../types.js';
+import { isReadOnlyTool } from '../lib/tool-scope.js';
+import { hashCredential } from '../lib/credential-hash.js';
+import { logAudit } from '../middleware/logging.js';
 
 export class ZettagridMcpServer {
   private server: Server;
   private client?: ZettagridClient;
+  private injectedCredentials?: InjectedZoneCredentials;
+  private readOnly: boolean;
+  private credentialHashPrefix: string;
 
-  constructor(server: Server) {
+  /**
+   * @param injected Per-request credentials for HTTP multi-tenant mode; omitted for stdio/env mode.
+   * @param readOnly When true (the /mcp/readonly mount), only list_/get_/show_/test_-prefixed
+   * tools are listed and callable (minus get_vm_console — see lib/tool-scope.ts).
+   */
+  constructor(server: Server, injected?: InjectedZoneCredentials, readOnly = false) {
     this.server = server;
+    this.injectedCredentials = injected;
+    this.readOnly = readOnly;
+    this.credentialHashPrefix = injected
+      ? hashCredential(injected.apiToken, injected.organizationName, injected.zone).slice(0, 12)
+      : 'env';
   }
 
   /**
@@ -56,7 +72,7 @@ export class ZettagridMcpServer {
   private async handleShowAllVdcResources(zoneId?: string): Promise<McpToolResponse<string>> {
     try {
       if (!this.client) {
-        this.client = new ZettagridClient();
+        this.client = new ZettagridClient(this.injectedCredentials);
       }
 
       // First get list of all VDCs
@@ -136,19 +152,41 @@ export class ZettagridMcpServer {
   }
 
   /**
+   * list_external_networks / get_provider_network_info require a provider-scope VCD token.
+   * A tenant token gets an HTTP 403 ("This operation is denied") straight from vCD, which
+   * reads like a transient failure worth retrying rather than the expected, permanent result
+   * of calling a provider-only endpoint with tenant credentials. Rewrite it into an explicit,
+   * actionable message instead of passing the raw 403 through.
+   */
+  private withProviderScopeHint(result: McpToolResponse, toolName: string): McpToolResponse {
+    if (result.success === false && result.error?.message?.includes('HTTP 403')) {
+      return {
+        ...result,
+        error: {
+          ...result.error,
+          code: 'PROVIDER_SCOPE_REQUIRED',
+          message: `'${toolName}' requires a provider-scope VCD API token. The token used here is tenant-scoped, and vCD denied the request (HTTP 403) — this is expected for a tenant token, not a bug to retry.`
+        }
+      };
+    }
+    return result;
+  }
+
+  /**
    * Initialize the MCP server with all tool handlers
    */
   async initialize(): Promise<void> {
     try {
       // Initialize the client here, after environment is loaded
-      this.client = new ZettagridClient();
+      this.client = new ZettagridClient(this.injectedCredentials);
     } catch (error) {
       console.error('Failed to initialize Zettagrid client:', error);
       throw error;
     }
     // Register list_tools handler
     this.server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: [
+      tools: (() => {
+        const allTools = [
         {
           name: 'test_zone',
           description: 'Test connectivity and authentication for a specific zone',
@@ -1250,7 +1288,9 @@ export class ZettagridMcpServer {
             properties: {}
           }
         }
-      ]
+        ];
+        return this.readOnly ? allTools.filter(tool => isReadOnlyTool(tool.name)) : allTools;
+      })()
     }));
 
     // Register call_tool handler
@@ -1263,6 +1303,21 @@ export class ZettagridMcpServer {
           'Server not properly initialized'
         );
       }
+
+      if (this.readOnly && !isReadOnlyTool(name)) {
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          `Tool '${name}' is not available on the read-only endpoint.`
+        );
+      }
+
+      const startedAt = Date.now();
+      const auditContext = {
+        credentialHashPrefix: this.credentialHashPrefix,
+        organization: this.injectedCredentials?.organizationName ?? 'env',
+        zone: (args?.zoneId as string | undefined) ?? this.injectedCredentials?.zone ?? 'default',
+        tool: name
+      };
 
       try {
         let result: McpToolResponse;
@@ -1301,7 +1356,7 @@ export class ZettagridMcpServer {
         switch (name) {
           case 'get_server_version': {
             // Get version from package.json and git commit hash
-            let version = '1.3.0'; // fallback
+            const version = '1.4.0'; // fallback, matches package.json — kept in sync manually
             let buildNumber = 'unknown';
 
             try {
@@ -1588,11 +1643,17 @@ export class ZettagridMcpServer {
             break;
 
           case 'list_external_networks':
-            result = await this.client.listExternalNetworks(args?.zoneId as string | undefined);
+            result = this.withProviderScopeHint(
+              await this.client.listExternalNetworks(args?.zoneId as string | undefined),
+              name
+            );
             break;
 
           case 'get_provider_network_info':
-            result = await this.client.getProviderNetworkInfo(args?.zoneId as string | undefined);
+            result = this.withProviderScopeHint(
+              await this.client.getProviderNetworkInfo(args?.zoneId as string | undefined),
+              name
+            );
             break;
 
           case 'get_vm':
@@ -1877,6 +1938,16 @@ export class ZettagridMcpServer {
           } as McpToolResponse;
         }
 
+        // result.success can be false without an exception (e.g. auth/validation failures the
+        // client reports as data rather than throwing) — the audit trail must reflect that,
+        // not just whether the JS call itself threw.
+        logAudit({
+          ...auditContext,
+          outcome: result.success === false ? 'error' : 'success',
+          durationMs: Date.now() - startedAt,
+          ...(result.success === false && result.error ? { errorMessage: result.error.message } : {})
+        });
+
         // Use formatted text if available, otherwise return JSON
         return {
           content: [
@@ -1887,10 +1958,13 @@ export class ZettagridMcpServer {
           ]
         };
       } catch (error) {
+        const rawMessage = error instanceof Error ? error.message : 'Unknown error';
+        logAudit({ ...auditContext, outcome: 'error', durationMs: Date.now() - startedAt, errorMessage: rawMessage });
+
         if (error instanceof McpError) {
           throw error;
         }
-        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const errorMessage = rawMessage;
         // Detect vCD concurrent-update conflict (HTTP 400 VAPP_UPDATE_VM with a blocking task ID)
         const concurrentMatch = errorMessage.match(/VAPP_UPDATE_VM\(com\.vmware\.vcloud\.entity\.task:([a-f0-9-]+)\)/);
         if (concurrentMatch) {

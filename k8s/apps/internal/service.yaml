@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: zettagrid-mcp-internal
+  namespace: zettagrid-mcp
+spec:
+  selector:
+    app: zettagrid-mcp
+    channel: internal
+  ports:
+    - port: 80
+      targetPort: 3001

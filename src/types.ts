@@ -13,6 +13,17 @@ export interface ZoneConfig {
   apiVersion: string;
 }
 
+/**
+ * Per-request credentials for multi-tenant HTTP mode. Injected into ZoneManager
+ * instead of the env-scanned zone pool used by stdio/single-user mode.
+ */
+export interface InjectedZoneCredentials {
+  apiToken: string;
+  organizationName: string;
+  zone: ZoneId;
+  apiVersion?: string;
+}
+
 export interface ZettagridConfig {
   zones: Record<string, ZoneConfig>;
   defaultZone: string;

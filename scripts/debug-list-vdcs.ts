@@ -1,7 +1,7 @@
 #!/usr/bin/env tsx
 /**
  * Debug list VDCs response
- * Usage: npx tsx src/examples/debug-list-vdcs.ts
+ * Usage: npx tsx scripts/debug-list-vdcs.ts
  */
 
 import { ZettagridClient } from '../client/zettagrid-client.js';
