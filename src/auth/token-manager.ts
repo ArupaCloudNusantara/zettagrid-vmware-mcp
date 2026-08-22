@@ -85,16 +85,28 @@ export class TokenManager {
    */
   private async getAuthToken(zoneConfig: ZoneConfig): Promise<AuthToken> {
     try {
-      // Build OAuth refresh URL: https://mycloud.per.zettagrid.com/oauth/tenant/your-org-name/token?grant_type=refresh_token&refresh_token=<token>
+      // OAuth refresh endpoint: https://mycloud.per.zettagrid.com/oauth/tenant/your-org-name/token
+      // VMware's own documented format (RFC 6749 §6) sends grant_type/refresh_token as an
+      // application/x-www-form-urlencoded POST body, not URL query parameters — the query-string
+      // form used here previously worked (vCD tolerates it) but put the long-lived refresh token
+      // directly in the URL, where it lands in access logs, proxy logs, and APM traces by
+      // default. The body form avoids that; it's not a vCD platform limitation, just the wrong
+      // request shape.
       const baseUrl = zoneConfig.apiEndpoint.replace('/api', '');
-      const refreshUrl = `${baseUrl}/oauth/tenant/${zoneConfig.organizationName}/token?grant_type=refresh_token&refresh_token=${zoneConfig.apiToken}`;
-      
+      const refreshUrl = `${baseUrl}/oauth/tenant/${zoneConfig.organizationName}/token`;
+      const refreshBody = new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: zoneConfig.apiToken
+      });
+
       const response = await fetch(refreshUrl, {
         method: 'POST',
         headers: {
           'Accept': 'application/json',
+          'Content-Type': 'application/x-www-form-urlencoded',
           'User-Agent': 'Zettagrid-MCP-Server/1.0.0'
-        }
+        },
+        body: refreshBody.toString()
       });
 
       if (!response.ok) {
