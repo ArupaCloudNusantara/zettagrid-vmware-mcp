@@ -3,4 +3,4 @@ resources:
   - service.yaml
 images:
   - name: ghcr.io/arupacloudnusantara/zettagrid-vmware-mcp
-    newTag: v0.0.0-unset # set only via `Promote to Demo` workflow_dispatch
+    newTag: c18947b
