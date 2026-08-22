@@ -17,6 +17,7 @@ import { ZettagridClient } from '../client/zettagrid-client.js';
 import { McpToolResponse, VdcResourceSummary, InjectedZoneCredentials } from '../types.js';
 import { isReadOnlyTool } from '../lib/tool-scope.js';
 import { hashCredential } from '../lib/credential-hash.js';
+import { SERVER_VERSION } from '../lib/package-info.js';
 import { logAudit } from '../middleware/logging.js';
 
 export class ZettagridMcpServer {
@@ -1355,8 +1356,7 @@ export class ZettagridMcpServer {
 
         switch (name) {
           case 'get_server_version': {
-            // Get version from package.json and git commit hash
-            const version = '1.4.0'; // fallback, matches package.json — kept in sync manually
+            const version = SERVER_VERSION;
             let buildNumber = 'unknown';
 
             try {
