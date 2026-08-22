@@ -308,11 +308,15 @@ HTTP endpoints (when `TRANSPORT=http`):
 
 ## Authentication
 
-The server exchanges your Zettagrid API token for a short-lived OAuth access token automatically:
+The server exchanges your Zettagrid API token for a short-lived OAuth access token automatically,
+following VMware Cloud Director's documented token-refresh format (RFC 6749 §6 — form-encoded
+POST body, not URL query parameters, so the token never lands in access/proxy logs):
 
 ```
 POST https://mycloud-{zone}.zettagrid.id/oauth/tenant/{org}/token
-  ?grant_type=refresh_token&refresh_token={api_token}
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=refresh_token&refresh_token={api_token}
 ```
 
 Sessions are cached and refreshed transparently. No additional auth setup is needed beyond providing the API token.
@@ -333,9 +337,11 @@ Sessions are cached and refreshed transparently. No additional auth setup is nee
 
 **Auth token test:**
 ```bash
-curl -s -X POST \
-  "https://mycloud-jkt.zettagrid.id/oauth/tenant/YourOrgName/token?grant_type=refresh_token&refresh_token=YourToken" \
-  -H "Accept: application/json" | jq .access_token
+curl -s -X POST "https://mycloud-jkt.zettagrid.id/oauth/tenant/YourOrgName/token" \
+  -H "Accept: application/json" \
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  --data-urlencode "grant_type=refresh_token" \
+  --data-urlencode "refresh_token=YourToken" | jq .access_token
 ```
 
 ---
