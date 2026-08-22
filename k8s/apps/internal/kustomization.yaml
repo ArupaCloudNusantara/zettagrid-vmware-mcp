@@ -3,4 +3,4 @@ resources:
   - service.yaml
 images:
   - name: ghcr.io/arupacloudnusantara/zettagrid-vmware-mcp
-    newTag: e8999e4
+    newTag: 9e2da8a
