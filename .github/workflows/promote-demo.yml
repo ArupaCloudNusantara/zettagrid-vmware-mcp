@@ -35,6 +35,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The actions-runner base image has no Node.js and no argocd CLI — unlike GitHub-hosted
+      # runners, a self-hosted runner starts genuinely bare. Both are needed below (smoke-test.mjs
+      # imports @modelcontextprotocol/sdk; the sync/wait/rollback steps call the argocd binary).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      - name: Install argocd CLI
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sSL -o "$HOME/bin/argocd" https://github.com/argoproj/argo-cd/releases/download/v3.5.1/argocd-linux-amd64
+          chmod +x "$HOME/bin/argocd"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+
       - name: Pin demo channel to promoted tag
         run: |
           cd k8s/apps/demo
@@ -46,8 +62,8 @@ jobs:
 
       - name: Sync Argo CD demo application
         run: |
-          argocd app sync zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER"
-          argocd app wait zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER" --health
+          argocd app sync zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER" --grpc-web
+          argocd app wait zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER" --grpc-web --health
         env:
           ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
@@ -60,7 +76,7 @@ jobs:
       - name: Roll back on smoke test failure
         if: failure()
         run: |
-          argocd app rollback zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER"
+          argocd app rollback zettagrid-mcp-demo --auth-token "$ARGOCD_AUTH_TOKEN" --server "$ARGOCD_SERVER" --grpc-web
         env:
           ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_AUTH_TOKEN }}
           ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
