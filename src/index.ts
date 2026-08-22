@@ -13,14 +13,13 @@ import { ZettagridMcpServer } from './server/mcp-server.js';
 import { extractZoneCredentials } from './middleware/auth.js';
 import { checkRateLimit } from './middleware/ratelimit.js';
 import { logAudit } from './middleware/logging.js';
+import { SERVER_VERSION } from './lib/package-info.js';
 import dotenv from 'dotenv';
 import express from 'express';
 import type { Request, Response } from 'express';
 
 // Load environment variables
 dotenv.config();
-
-const SERVER_VERSION = '1.1.0';
 
 function createServer(): Server {
   return new Server(
